@@ -24,8 +24,9 @@ function GetDeepChildBySpec(Inputs, Outputs) {
  *        case the remainder is treated as a regular expression to match the child's "Value" property.
  *     3. A wildcard ("", "*") indicating that any value is acceptable.
  *
- *   Note: Both ChildType (if provided as a simple string) and ChildValue cannot be wildcards
- *         simultaneously.
+ *   For each matching candidate, the function returns the full path (concatenation of types from 
+ *   the root ParentPropertySet down to the matching node) in the output "ChildConcatedTypes". 
+ *   This full path maps one-to-one with the corresponding value in "ChildConcatedValues".
  *
  * Usage:
  *   Input Arguments:
@@ -55,7 +56,8 @@ function GetDeepChildBySpec(Inputs, Outputs) {
  *        The total count of matching child nodes.
  *
  *     3. ChildConcatedTypes:
- *        A concatenated string of matching child types, joined by the OutputDelimiter.
+ *        A concatenated string of the full paths (each path is a series of type names 
+ *        separated by "/") for matching child nodes, joined by the OutputDelimiter.
  *
  *     4. ChildConcatedValues:
  *        A concatenated string of matching child values, joined by the OutputDelimiter.
@@ -69,7 +71,7 @@ function GetDeepChildBySpec(Inputs, Outputs) {
  *   Output:
  *     ChildExists = "Y",
  *     ChildCount = "2",
- *     ChildConcatedTypes = "ChildTypeA|ChildTypeA",
+ *     ChildConcatedTypes = "RootType/Type1/Type2/ChildTypeA|RootType/Type1/Type4/ChildTypeA",
  *     ChildConcatedValues = "ChildValueA|ChildValueA".
  *
  * Notes:
@@ -151,23 +153,29 @@ function GetDeepChildBySpec(Inputs, Outputs) {
      * Initialize Result Variables
      *************************************************************/
     var childCount = 0;                // Count of matching child nodes.
-    var childConcatedTypes = "";         // Accumulated matching child types.
+    var childConcatedTypes = "";         // Accumulated full paths of matching child types.
     var childConcatedValues = "";        // Accumulated matching child values.
-    var matchingCandidates = [];         // Array to store matching candidate PropertySets.
+    var matchingCandidates = [];         // Array to store objects { node, path } for matching candidates.
 
     /*************************************************************
      * Search Logic: Simple Search vs. Path Specification
      *************************************************************/
     if (!isPathSpec) {
       // Simple Search: perform an iterative depth-first search on the entire tree.
+      // We'll use a stack that holds objects with the node and its full path.
       var stack = [];
       // Initialize the stack with all immediate children of the ParentPropertySet.
+      // Full path is: ParentPropertySet.GetType() + "/" + child.GetType()
+      var rootType = parentPS.GetType();
       for (var i = 0; i < parentPS.GetChildCount(); i++) {
-        stack.push(parentPS.GetChild(i));
+        var child = parentPS.GetChild(i);
+        stack.push({ node: child, path: rootType + "/" + child.GetType() });
       }
       // Iterate while there are nodes in the stack.
       while (stack.length > 0) {
-        var currentNode = stack.pop();
+        var currentObj = stack.pop();
+        var currentNode = currentObj.node;
+        var currentPath = currentObj.path;
         // Check if the current node matches the ChildType criteria.
         var typeMatches = false;
         if (isChildTypeWildcard) {
@@ -183,28 +191,32 @@ function GetDeepChildBySpec(Inputs, Outputs) {
         if (isChildValueWildcard) {
           valueMatches = true;  // Wildcard: match any value.
         } else if (isRegex) {
-          // Use the regular expression to test the current value.
           valueMatches = regex.test(currentValue);
         } else {
           if (currentValue === childValueInput) {
             valueMatches = true;
           }
         }
-        // If both criteria match, add the node to the matching candidates.
+        // If both criteria match, add the current node and its full path to matching candidates.
         if (typeMatches && valueMatches) {
-          matchingCandidates.push(currentNode);
+          matchingCandidates.push({ node: currentNode, path: currentPath });
         }
-        // Push all children of the current node onto the stack.
+        // Push all children of the current node onto the stack with updated full path.
         for (var j = 0; j < currentNode.GetChildCount(); j++) {
-          stack.push(currentNode.GetChild(j));
+          var childObj = currentNode.GetChild(j);
+          // Update the path: currentPath + "/" + child's type.
+          var newPath = currentPath + "/" + childObj.GetType();
+          stack.push({ node: childObj, path: newPath });
         }
       }
     } else {
       // Path Specification: process the ChildType input as a path (e.g., "0/*/1/ChildTypeA").
+      // We'll use an array of candidate objects { node, path }.
+      // Initialize with the ParentPropertySet as the starting candidate.
+      var candidates = [{ node: parentPS, path: parentPS.GetType() }];
+      // Split the path into tokens.
       var tokens = childTypeInput.split("/");
-      // Start with the ParentPropertySet as the sole candidate.
-      var candidates = [parentPS];
-      // Process each token in sequence.
+      // Process each token sequentially.
       for (var i = 0; i < tokens.length; i++) {
         var token = tokens[i];
         var nextCandidates = [];
@@ -213,40 +225,43 @@ function GetDeepChildBySpec(Inputs, Outputs) {
           var index = parseInt(token, 10);
           for (var j = 0; j < candidates.length; j++) {
             var candidate = candidates[j];
-            if (candidate.GetChildCount() > index) {
-              nextCandidates.push(candidate.GetChild(index));
+            if (candidate.node.GetChildCount() > index) {
+              var childNode = candidate.node.GetChild(index);
+              // Update full path.
+              nextCandidates.push({ node: childNode, path: candidate.path + "/" + childNode.GetType() });
             }
           }
         } else if (token === "*") {
           // Wildcard token: select all children of the current candidates.
           for (var j = 0; j < candidates.length; j++) {
             var candidate = candidates[j];
-            for (var k = 0; k < candidate.GetChildCount(); k++) {
-              nextCandidates.push(candidate.GetChild(k));
+            for (var k = 0; k < candidate.node.GetChildCount(); k++) {
+              var childNode = candidate.node.GetChild(k);
+              nextCandidates.push({ node: childNode, path: candidate.path + "/" + childNode.GetType() });
             }
           }
         } else {
           // Literal token: select children whose type matches the token.
           for (var j = 0; j < candidates.length; j++) {
             var candidate = candidates[j];
-            for (var k = 0; k < candidate.GetChildCount(); k++) {
-              var child = candidate.GetChild(k);
-              if (child.GetType() === token) {
-                nextCandidates.push(child);
+            for (var k = 0; k < candidate.node.GetChildCount(); k++) {
+              var childNode = candidate.node.GetChild(k);
+              if (childNode.GetType() === token) {
+                nextCandidates.push({ node: childNode, path: candidate.path + "/" + childNode.GetType() });
               }
             }
           }
         }
-        // Update candidates for the next token.
+        // Update candidates for next iteration.
         candidates = nextCandidates;
         if (candidates.length === 0) {
           break;
         }
       }
-      // After processing all tokens, filter the resulting candidates by ChildValue.
+      // After processing tokens, filter the candidates by ChildValue.
       for (var i = 0; i < candidates.length; i++) {
-        var candidate = candidates[i];
-        var candidateValue = candidate.GetProperty("Value");
+        var candidateObj = candidates[i];
+        var candidateValue = candidateObj.node.GetProperty("Value");
         var valueMatches = false;
         if (isChildValueWildcard) {
           valueMatches = true;
@@ -258,7 +273,7 @@ function GetDeepChildBySpec(Inputs, Outputs) {
           }
         }
         if (valueMatches) {
-          matchingCandidates.push(candidate);
+          matchingCandidates.push(candidateObj);
         }
       }
     }
@@ -267,17 +282,17 @@ function GetDeepChildBySpec(Inputs, Outputs) {
      * Aggregate Results from Matching Candidates
      *************************************************************/
     for (var i = 0; i < matchingCandidates.length; i++) {
-      var candidate = matchingCandidates[i];
+      var candidateObj = matchingCandidates[i];
       childCount++;
-      // Accumulate the candidate's type.
-      var candidateType = candidate.GetType();
+      // Use the stored full path as the candidate's type path.
+      var fullPath = candidateObj.path;
       if (childConcatedTypes !== "") {
-        childConcatedTypes = childConcatedTypes + outputDelimiter + candidateType;
+        childConcatedTypes = childConcatedTypes + outputDelimiter + fullPath;
       } else {
-        childConcatedTypes = candidateType;
+        childConcatedTypes = fullPath;
       }
       // Accumulate the candidate's value.
-      var candidateValue = candidate.GetProperty("Value");
+      var candidateValue = candidateObj.node.GetProperty("Value");
       if (childConcatedValues !== "") {
         childConcatedValues = childConcatedValues + outputDelimiter + candidateValue;
       } else {
@@ -303,6 +318,7 @@ function GetDeepChildBySpec(Inputs, Outputs) {
 
   return;
 }
+
 
 
 ```
