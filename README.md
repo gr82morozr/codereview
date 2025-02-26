@@ -3,38 +3,28 @@ code review
 
 ```
 import java.text.SimpleDateFormat
+import java.util.Random
 
-// Get current date in YYYYMMDD format
-def todayDate = new SimpleDateFormat("yyyyMMdd").format(new Date())
+// Define the format
+def dateFormat = new SimpleDateFormat("MM/dd/yyyy HH:mm:ss")
 
-// Property names
-def dateProperty = "LastSequenceDate"
-def sequenceProperty = "SequenceNumber"
+// Get current time
+def now = System.currentTimeMillis()
 
-// Get previous stored date
-def storedDate = context.testCase.getPropertyValue(dateProperty)
-def storedSequence = context.testCase.getPropertyValue(sequenceProperty)
+// Generate a random offset (between 0 and 7 days in milliseconds)
+def randomOffset = new Random().nextInt(7 * 24 * 60 * 60 * 1000) // Random up to 7 days
 
-// Initialize sequence number
-if (storedDate != todayDate) {
-    // New day, reset sequence
-    storedSequence = "1"
-    context.testCase.setPropertyValue(dateProperty, todayDate)
-} else {
-    // Increment sequence for the day
-    storedSequence = (storedSequence.toInteger() + 1).toString()
-}
+// Apply offset
+def randomTimestamp = new Date(now - randomOffset) // Subtract offset for random past date
 
-// Store updated sequence number
-context.testCase.setPropertyValue(sequenceProperty, storedSequence)
+// Format the date
+def formattedTimestamp = dateFormat.format(randomTimestamp)
 
-// Generate unique sequence for today
-def uniqueSequence = todayDate + "-" + storedSequence
+// Store in Test Case property
+context.testCase.setPropertyValue("RandomTimestamp", formattedTimestamp)
 
-// Store unique sequence in a property
-context.testCase.setPropertyValue("UniqueSequence", uniqueSequence)
+log.info("Generated Random Timestamp: " + formattedTimestamp)
 
-log.info("Generated Unique Sequence: " + uniqueSequence)
 
 
 
