@@ -3,27 +3,36 @@ code review
 
 ```
 import java.text.SimpleDateFormat
-import java.util.Random
 
-// Define the format
+// Define the date format
 def dateFormat = new SimpleDateFormat("MM/dd/yyyy HH:mm:ss")
 
-// Get current time
-def now = System.currentTimeMillis()
+// Get the existing RandomTimestamp property
+def randomTimestampStr = context.expand('${#TestCase#RandomTimestamp}')
 
-// Generate a random offset (between 0 and 7 days in milliseconds)
-def randomOffset = new Random().nextInt(7 * 24 * 60 * 60 * 1000) // Random up to 7 days
+if (randomTimestampStr) {
+    def date = dateFormat.parse(randomTimestampStr) // Convert to Date
+    def epochTime = date.getTime() / 1000 // Convert to epoch time (seconds)
 
-// Apply offset
-def randomTimestamp = new Date(now - randomOffset) // Subtract offset for random past date
+    // Generate new timestamps in epoch
+    def epochB4 = epochTime - 10
+    def epochAF = epochTime + 10
 
-// Format the date
-def formattedTimestamp = dateFormat.format(randomTimestamp)
+    // Convert back to formatted timestamps
+    def randomTimestampB4 = dateFormat.format(new Date(epochB4 * 1000))
+    def randomTimestampAF = dateFormat.format(new Date(epochAF * 1000))
 
-// Store in Test Case property
-context.testCase.setPropertyValue("RandomTimestamp", formattedTimestamp)
+    // Store values as test case properties
+    testRunner.testCase.setPropertyValue("RandomTimestamp_B4", randomTimestampB4)
+    testRunner.testCase.setPropertyValue("RandomTimestamp_AF", randomTimestampAF)
 
-log.info("Generated Random Timestamp: " + formattedTimestamp)
+    // Log results
+    log.info("RandomTimestamp: " + randomTimestampStr)
+    log.info("RandomTimestamp_B4: " + randomTimestampB4)
+    log.info("RandomTimestamp_AF: " + randomTimestampAF)
+} else {
+    log.error("RandomTimestamp property is missing or empty.")
+}
 
 
 
