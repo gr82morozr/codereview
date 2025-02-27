@@ -4,8 +4,12 @@ code review
 ```
 #!/usr/bin/env python3
 """
-This script filters a large log file by removing any lines that match one or more
-regular expression patterns. Static parameters (like chunk size and CPU cores)
+This script filters a large log file by removing lines based on two criteria:
+  1. Removal regex patterns (specified in the config)
+  2. Timestamp filtering – only lines whose timestamp (extracted via a regex)
+     falls within a configured FROM_TIMESTAMP and TO_TIMESTAMP range are kept.
+     
+Static parameters (such as chunk size, number of CPU cores, and timestamp bounds)
 are stored in the embedded configuration section at the bottom.
 
 Usage: file_log.py <log_file>
@@ -18,24 +22,28 @@ import sys
 import re
 import multiprocessing
 import time
+from datetime import datetime
 
 def parse_config():
     """
-    Reads the current script file (__file__) to extract configuration settings.
-    The configuration is expected to be placed at the bottom of the script between two lines
-    that exactly match "===========================".
+    Reads this script file (__file__) to extract configuration settings.
+    The configuration is placed at the bottom of the script between two lines that exactly match
+    "===========================".
     
-    Configuration format example:
+    Expected configuration format example:
       output_folder = D:\
       chunk_size = 1000
       num_cpus = 2
+      FROM_TIMESTAMP = 2023-01-01 00:00:00
+      TO_TIMESTAMP = 2023-12-31 23:59:59
       regexp_pattern =
       ^.*Begin: Fetch for sql Cursor.*$
       ^.*Another pattern to filter.*$
+      ^.*[KEY].*$
       
     Returns:
-      A dictionary with keys for static parameters (e.g. "output_folder", "chunk_size", "num_cpus")
-      and a key "patterns" containing a list of regex strings.
+      A dictionary with static parameters and a key "patterns" containing a list
+      of regex strings (removal patterns).
     """
     config = {}
     patterns = []
@@ -58,7 +66,7 @@ def parse_config():
         if inside_config:
             config_section.append(line.strip())
     
-    in_patterns = False  # Flag indicating that following lines are regex patterns.
+    in_patterns = False  # Indicates that subsequent lines are regex patterns.
     for line in config_section:
         if not line:
             continue
@@ -81,56 +89,102 @@ def parse_config():
     config["patterns"] = patterns
     return config
 
+# Global variables for worker processes.
 compiled_patterns = None
+compiled_timestamp_pattern = None
+global_from_timestamp = None
+global_to_timestamp = None
 """
-Global variable to store compiled regular expressions. Each worker process
-initializes this once to speed up filtering.
+Global variables:
+  - compiled_patterns: list of compiled removal regex patterns.
+  - compiled_timestamp_pattern: regex to extract the timestamp.
+  - global_from_timestamp / global_to_timestamp: timestamp boundaries (as datetime objects).
 """
 
-def init_worker(patterns):
+def init_worker(patterns, from_ts, to_ts):
     """
     Worker initializer function.
-    Compiles each regex pattern from the configuration and stores them in the global variable.
+    Compiles each removal regex pattern and the timestamp extraction pattern,
+    and sets the global timestamp boundaries.
     
     Args:
-      patterns: A list of regex pattern strings.
+      patterns: List of regex strings for removal.
+      from_ts: A datetime object (lower bound) or None.
+      to_ts: A datetime object (upper bound) or None.
     """
-    global compiled_patterns
+    global compiled_patterns, compiled_timestamp_pattern, global_from_timestamp, global_to_timestamp
     compiled_patterns = [re.compile(p) for p in patterns]
+    # Compile the timestamp extraction regex.
+    # This regex is expected to capture a timestamp (format "YYYY-MM-DD hh:mm:ss")
+    # from the log line in group(1).
+    compiled_timestamp_pattern = re.compile(r"^\w+\s+\w+\s+\d+\w{16}\:\s+(\d{4}\-\d{2}\-\d{2}\s\d{2}:\d{2}:\d{2})")
+    global_from_timestamp = from_ts
+    global_to_timestamp = to_ts
 
 def process_chunk_wrapper(data):
     """
     Worker function to filter a chunk of log lines.
     
-    Args:
-      data: A tuple (lines, chunk_bytes) where 'lines' is a list of strings read from the log file.
+    For each line:
+      1. Remove the line if any removal regex matches.
+      2. Otherwise, attempt to extract a timestamp.
+         - If a timestamp is found:
+             * If both bounds are provided, remove the line if its timestamp is
+               before FROM_TIMESTAMP or after TO_TIMESTAMP.
+             * If only FROM_TIMESTAMP is provided, remove the line if its timestamp
+               is before FROM_TIMESTAMP.
+             * If only TO_TIMESTAMP is provided, remove the line if its timestamp
+               is after TO_TIMESTAMP.
+         - If no timestamp is found or parsing fails, the line is kept.
     
+    Args:
+      data: Tuple (lines, chunk_bytes) where 'lines' is a list of strings.
+      
     Returns:
-      A list of lines that do NOT match any of the regex patterns.
+      A list of lines that pass the filters.
     """
     lines, _ = data
     filtered = []
     for line in lines:
         skip = False
+        # Check removal patterns.
         for pattern in compiled_patterns:
             if pattern.search(line):
-                skip = True  # Mark line for removal if any pattern matches.
+                skip = True
                 break
+        if not skip:
+            m = compiled_timestamp_pattern.search(line)
+            if m:
+                ts_str = m.group(1)
+                try:
+                    line_ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                    if global_from_timestamp and global_to_timestamp:
+                        if line_ts < global_from_timestamp or line_ts > global_to_timestamp:
+                            skip = True
+                    elif global_from_timestamp:
+                        if line_ts < global_from_timestamp:
+                            skip = True
+                    elif global_to_timestamp:
+                        if line_ts > global_to_timestamp:
+                            skip = True
+                except Exception:
+                    # If timestamp parsing fails, keep the line.
+                    pass
         if not skip:
             filtered.append(line)
     return filtered
 
 def read_chunks(file_obj, chunk_size):
     """
-    Generator function to read a file in chunks of a given number of lines.
+    Generator that reads a file in chunks of a specified number of lines.
     
     Args:
-      file_obj: An open file object for reading.
+      file_obj: Open file object.
       chunk_size: Number of lines per chunk.
-    
+      
     Yields:
-      A tuple (list_of_lines, total_bytes) where total_bytes is the approximate number
-      of bytes read in that chunk.
+      Tuple (list_of_lines, bytes_count) where bytes_count is the approximate number
+      of bytes read for that chunk.
     """
     while True:
         lines = []
@@ -138,7 +192,7 @@ def read_chunks(file_obj, chunk_size):
         for _ in range(chunk_size):
             line = file_obj.readline()
             if not line:
-                break  # End-of-file reached.
+                break
             lines.append(line)
             bytes_count += len(line.encode('utf-8'))
         if not lines:
@@ -147,11 +201,11 @@ def read_chunks(file_obj, chunk_size):
 
 def update_progress(processed, total):
     """
-    Updates and prints a progress bar (in percentage) on the same console line.
+    Updates and prints a progress bar (percentage) on the same console line.
     
     Args:
-      processed: Number of bytes processed so far.
-      total: Total number of bytes in the file.
+      processed: Bytes processed so far.
+      total: Total file size in bytes.
     """
     percent = (processed / total) * 100
     sys.stdout.write(f"\rProgress: {percent:.2f}%")
@@ -162,8 +216,10 @@ def main():
     Main function that:
       - Parses command-line arguments.
       - Loads configuration from this script.
+      - Parses FROM_TIMESTAMP and TO_TIMESTAMP (if provided) into datetime objects.
       - Sets up multiprocessing to filter the log file in chunks.
-      - Writes the filtered log to the specified output folder while preserving line order.
+      - Writes the filtered output (maintaining line order and ensuring no two
+        consecutive empty lines).
       - Updates a progress bar as the file is processed.
     """
     if len(sys.argv) != 2:
@@ -177,14 +233,25 @@ def main():
     
     config = parse_config()
     
-    # Retrieve static parameters from configuration.
+    # Retrieve static parameters.
     output_folder = config.get("output_folder", ".")
-    chunk_size = config.get("chunk_size", 1000)  # Number of lines per chunk.
-    num_cpus = config.get("num_cpus", 2)           # Number of CPU cores to use.
+    chunk_size = config.get("chunk_size", 1000)
+    num_cpus = config.get("num_cpus", 2)
+    from_timestamp_str = config.get("FROM_TIMESTAMP", "")
+    to_timestamp_str = config.get("TO_TIMESTAMP", "")
+    
+    # Parse timestamp boundaries if provided.
+    try:
+        from_timestamp = datetime.strptime(from_timestamp_str, "%Y-%m-%d %H:%M:%S") if from_timestamp_str.strip() else None
+    except Exception:
+        from_timestamp = None
+    try:
+        to_timestamp = datetime.strptime(to_timestamp_str, "%Y-%m-%d %H:%M:%S") if to_timestamp_str.strip() else None
+    except Exception:
+        to_timestamp = None
     
     if not output_folder.endswith("\\") and not output_folder.endswith("/"):
         output_folder += os.sep
-    
     base_name = os.path.basename(input_file)
     output_file = os.path.join(output_folder, base_name + ".filtered.log")
     
@@ -202,26 +269,33 @@ def main():
         print(f"Error: Could not open output file '{output_file}' for writing: {e}")
         sys.exit(1)
     
-    # Create a multiprocessing pool with num_cpus worker processes.
-    pool = multiprocessing.Pool(processes=num_cpus, initializer=init_worker, initargs=(patterns,))
+    # Create a multiprocessing pool with num_cpus workers.
+    pool = multiprocessing.Pool(processes=num_cpus, initializer=init_worker, initargs=(patterns, from_timestamp, to_timestamp))
     
-    tasks = []      # List to hold pending async tasks.
+    tasks = []      # To hold async tasks.
     batch_size = 10 # Process up to 10 chunks concurrently.
-    # We also maintain the order by processing tasks in the same sequence they were submitted.
+    last_line_empty = False  # To avoid writing two consecutive empty lines.
     
     try:
         with open(input_file, 'r', encoding='utf-8') as in_f:
             chunk_generator = read_chunks(in_f, chunk_size)
             for chunk_data in chunk_generator:
-                # Submit the chunk for asynchronous processing.
                 task = pool.apply_async(process_chunk_wrapper, (chunk_data,))
                 tasks.append((chunk_data[1], task))
                 
-                # Once a batch is collected, process them in the order of submission.
                 if len(tasks) >= batch_size:
                     for bytes_count, async_result in tasks:
-                        filtered_lines = async_result.get()  # Waits for the result in order.
-                        out_f.writelines(filtered_lines)
+                        filtered_lines = async_result.get()  # Retrieve in submission order.
+                        for line in filtered_lines:
+                            if line.strip() == "":
+                                if last_line_empty:
+                                    continue
+                                else:
+                                    out_f.write(line)
+                                    last_line_empty = True
+                            else:
+                                out_f.write(line)
+                                last_line_empty = False
                         processed_bytes += bytes_count
                         update_progress(processed_bytes, total_size)
                     tasks = []  # Clear the batch.
@@ -229,7 +303,16 @@ def main():
             # Process any remaining tasks.
             for bytes_count, async_result in tasks:
                 filtered_lines = async_result.get()
-                out_f.writelines(filtered_lines)
+                for line in filtered_lines:
+                    if line.strip() == "":
+                        if last_line_empty:
+                            continue
+                        else:
+                            out_f.write(line)
+                            last_line_empty = True
+                    else:
+                        out_f.write(line)
+                        last_line_empty = False
                 processed_bytes += bytes_count
                 update_progress(processed_bytes, total_size)
     finally:
@@ -242,14 +325,17 @@ def main():
 if __name__ == '__main__':
     main()
 
-"""
+r"""
 ===========================
 output_folder = D:\
 chunk_size = 1000
 num_cpus = 2
+FROM_TIMESTAMP = 2023-01-01 00:00:00
+TO_TIMESTAMP = 2023-12-31 23:59:59
 regexp_pattern =
 ^.*Begin: Fetch for sql Cursor.*$
 ^.*Another pattern to filter.*$
+^.*[KEY].*$
 ===========================
 """
 
