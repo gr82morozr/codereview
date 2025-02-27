@@ -7,33 +7,36 @@ code review
 This script filters a large log file by removing lines based on two criteria:
   1. Removal regex patterns (specified in the config)
   2. Timestamp filtering – only lines whose timestamp (extracted via a regex)
-     falls within a configured FROM_TIMESTAMP and TO_TIMESTAMP range are kept.
+     fall within the configured FROM_TIMESTAMP and TO_TIMESTAMP range are kept.
      
-Static parameters (such as chunk size, number of CPU cores, and timestamp bounds)
-are stored in the embedded configuration section at the bottom.
-
+For lines that cannot be parsed for a timestamp, the script buffers them and waits
+until it finds a line with a valid timestamp. Then:
+  - If that valid timestamp is older than FROM_TIMESTAMP, the entire buffered block is discarded.
+  - If it is within range, the buffered block is flushed (i.e. output) and subsequent lines are processed.
+  - If a valid timestamp is later than TO_TIMESTAMP, processing stops.
+     
+The output file is written in the same order as the input and no two consecutive empty lines are written.
+Static parameters (such as chunk size, output folder, and timestamp bounds) are stored in the embedded configuration section.
+     
 Usage: file_log.py <log_file>
-The filtered output is written to a file named <log_file>.filtered.log in the folder
-specified by "output_folder" in the configuration.
+The filtered output is written to <log_file>.filtered.log in the folder specified by "output_folder" in the config.
 """
 
 import os
 import sys
 import re
-import multiprocessing
-import time
 from datetime import datetime
 
 def parse_config():
     """
     Reads this script file (__file__) to extract configuration settings.
-    The configuration is placed at the bottom of the script between two lines that exactly match
-    "===========================".
+    The configuration is placed at the bottom of the script between two lines that exactly match:
+    
+      ===========================
     
     Expected configuration format example:
       output_folder = D:\
       chunk_size = 1000
-      num_cpus = 2
       FROM_TIMESTAMP = 2023-01-01 00:00:00
       TO_TIMESTAMP = 2023-12-31 23:59:59
       regexp_pattern =
@@ -66,7 +69,7 @@ def parse_config():
         if inside_config:
             config_section.append(line.strip())
     
-    in_patterns = False  # Indicates that subsequent lines are regex patterns.
+    in_patterns = False  # Flag indicating that subsequent lines are regex patterns.
     for line in config_section:
         if not line:
             continue
@@ -89,138 +92,21 @@ def parse_config():
     config["patterns"] = patterns
     return config
 
-# Global variables for worker processes.
-compiled_patterns = None
-compiled_timestamp_pattern = None
-global_from_timestamp = None
-global_to_timestamp = None
-"""
-Global variables:
-  - compiled_patterns: list of compiled removal regex patterns.
-  - compiled_timestamp_pattern: regex to extract the timestamp.
-  - global_from_timestamp / global_to_timestamp: timestamp boundaries (as datetime objects).
-"""
-
-def init_worker(patterns, from_ts, to_ts):
-    """
-    Worker initializer function.
-    Compiles each removal regex pattern and the timestamp extraction pattern,
-    and sets the global timestamp boundaries.
-    
-    Args:
-      patterns: List of regex strings for removal.
-      from_ts: A datetime object (lower bound) or None.
-      to_ts: A datetime object (upper bound) or None.
-    """
-    global compiled_patterns, compiled_timestamp_pattern, global_from_timestamp, global_to_timestamp
-    compiled_patterns = [re.compile(p) for p in patterns]
-    # Compile the timestamp extraction regex.
-    # This regex is expected to capture a timestamp (format "YYYY-MM-DD hh:mm:ss")
-    # from the log line in group(1).
-    compiled_timestamp_pattern = re.compile(r"^\w+\s+\w+\s+\d+\w{16}\:\s+(\d{4}\-\d{2}\-\d{2}\s\d{2}:\d{2}:\d{2})")
-    global_from_timestamp = from_ts
-    global_to_timestamp = to_ts
-
-def process_chunk_wrapper(data):
-    """
-    Worker function to filter a chunk of log lines.
-    
-    For each line:
-      1. Remove the line if any removal regex matches.
-      2. Otherwise, attempt to extract a timestamp.
-         - If a timestamp is found:
-             * If both bounds are provided, remove the line if its timestamp is
-               before FROM_TIMESTAMP or after TO_TIMESTAMP.
-             * If only FROM_TIMESTAMP is provided, remove the line if its timestamp
-               is before FROM_TIMESTAMP.
-             * If only TO_TIMESTAMP is provided, remove the line if its timestamp
-               is after TO_TIMESTAMP.
-         - If no timestamp is found or parsing fails, the line is kept.
-    
-    Args:
-      data: Tuple (lines, chunk_bytes) where 'lines' is a list of strings.
-      
-    Returns:
-      A list of lines that pass the filters.
-    """
-    lines, _ = data
-    filtered = []
-    for line in lines:
-        skip = False
-        # Check removal patterns.
-        for pattern in compiled_patterns:
-            if pattern.search(line):
-                skip = True
-                break
-        if not skip:
-            m = compiled_timestamp_pattern.search(line)
-            if m:
-                ts_str = m.group(1)
-                try:
-                    line_ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                    if global_from_timestamp and global_to_timestamp:
-                        if line_ts < global_from_timestamp or line_ts > global_to_timestamp:
-                            skip = True
-                    elif global_from_timestamp:
-                        if line_ts < global_from_timestamp:
-                            skip = True
-                    elif global_to_timestamp:
-                        if line_ts > global_to_timestamp:
-                            skip = True
-                except Exception:
-                    # If timestamp parsing fails, keep the line.
-                    pass
-        if not skip:
-            filtered.append(line)
-    return filtered
-
-def read_chunks(file_obj, chunk_size):
-    """
-    Generator that reads a file in chunks of a specified number of lines.
-    
-    Args:
-      file_obj: Open file object.
-      chunk_size: Number of lines per chunk.
-      
-    Yields:
-      Tuple (list_of_lines, bytes_count) where bytes_count is the approximate number
-      of bytes read for that chunk.
-    """
-    while True:
-        lines = []
-        bytes_count = 0
-        for _ in range(chunk_size):
-            line = file_obj.readline()
-            if not line:
-                break
-            lines.append(line)
-            bytes_count += len(line.encode('utf-8'))
-        if not lines:
-            break
-        yield (lines, bytes_count)
-
-def update_progress(processed, total):
-    """
-    Updates and prints a progress bar (percentage) on the same console line.
-    
-    Args:
-      processed: Bytes processed so far.
-      total: Total file size in bytes.
-    """
-    percent = (processed / total) * 100
-    sys.stdout.write(f"\rProgress: {percent:.2f}%")
-    sys.stdout.flush()
-
 def main():
     """
     Main function that:
-      - Parses command-line arguments.
-      - Loads configuration from this script.
-      - Parses FROM_TIMESTAMP and TO_TIMESTAMP (if provided) into datetime objects.
-      - Sets up multiprocessing to filter the log file in chunks.
-      - Writes the filtered output (maintaining line order and ensuring no two
-        consecutive empty lines).
-      - Updates a progress bar as the file is processed.
+      - Parses command-line arguments and loads configuration.
+      - Converts FROM_TIMESTAMP and TO_TIMESTAMP (if provided) into datetime objects.
+      - Processes the input log file sequentially:
+          * For each line, first checks removal regex patterns.
+          * Buffers lines that cannot be parsed for a timestamp.
+          * When a line with a valid timestamp is found:
+              - If the timestamp is older than FROM_TIMESTAMP, the entire buffered block is discarded.
+              - Otherwise (and if within TO_TIMESTAMP if provided), the buffered block is flushed to output and output mode starts.
+          * Once output mode has started, each line is checked (if it has a timestamp, compared against TO_TIMESTAMP) before being written.
+          * Processing stops if a valid timestamp is found that is later than TO_TIMESTAMP.
+      - Ensures that no two consecutive empty lines are written.
+      - Writes the filtered output in the same order as the input.
     """
     if len(sys.argv) != 2:
         print("Usage: file_log.py <log_file>")
@@ -235,18 +121,16 @@ def main():
     
     # Retrieve static parameters.
     output_folder = config.get("output_folder", ".")
-    chunk_size = config.get("chunk_size", 1000)
-    num_cpus = config.get("num_cpus", 2)
-    from_timestamp_str = config.get("FROM_TIMESTAMP", "")
-    to_timestamp_str = config.get("TO_TIMESTAMP", "")
+    # chunk_size is kept for compatibility but is not used in sequential processing.
+    from_timestamp_str = config.get("FROM_TIMESTAMP", "").strip()
+    to_timestamp_str = config.get("TO_TIMESTAMP", "").strip()
     
-    # Parse timestamp boundaries if provided.
     try:
-        from_timestamp = datetime.strptime(from_timestamp_str, "%Y-%m-%d %H:%M:%S") if from_timestamp_str.strip() else None
+        from_timestamp = datetime.strptime(from_timestamp_str, "%Y-%m-%d %H:%M:%S") if from_timestamp_str else None
     except Exception:
         from_timestamp = None
     try:
-        to_timestamp = datetime.strptime(to_timestamp_str, "%Y-%m-%d %H:%M:%S") if to_timestamp_str.strip() else None
+        to_timestamp = datetime.strptime(to_timestamp_str, "%Y-%m-%d %H:%M:%S") if to_timestamp_str else None
     except Exception:
         to_timestamp = None
     
@@ -260,8 +144,16 @@ def main():
         print("Error: No regex patterns found in configuration.")
         sys.exit(1)
     
-    total_size = os.path.getsize(input_file)
-    processed_bytes = 0
+    # Compile removal patterns.
+    removal_patterns = [re.compile(p) for p in patterns]
+    """
+    Each removal pattern will cause a line to be skipped (i.e. removed) if it matches.
+    """
+    
+    # Compile the timestamp extraction regex.
+    # This regex is expected to capture a timestamp in the format "YYYY-MM-DD hh:mm:ss" from the log line.
+    # (It uses the same pattern as before.)
+    timestamp_pattern = re.compile(r"^\w+\s+\w+\s+\d+\w{16}\:\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
     
     try:
         out_f = open(output_file, 'w', encoding='utf-8')
@@ -269,67 +161,101 @@ def main():
         print(f"Error: Could not open output file '{output_file}' for writing: {e}")
         sys.exit(1)
     
-    # Create a multiprocessing pool with num_cpus workers.
-    pool = multiprocessing.Pool(processes=num_cpus, initializer=init_worker, initargs=(patterns, from_timestamp, to_timestamp))
+    buffer = []         # Buffer for lines before output mode is determined.
+    started_output = False  # Flag to indicate that a valid in-range timestamp has been found and output has started.
+    last_line_empty = False # Flag to ensure no two consecutive empty lines are written.
     
-    tasks = []      # To hold async tasks.
-    batch_size = 10 # Process up to 10 chunks concurrently.
-    last_line_empty = False  # To avoid writing two consecutive empty lines.
-    
-    try:
-        with open(input_file, 'r', encoding='utf-8') as in_f:
-            chunk_generator = read_chunks(in_f, chunk_size)
-            for chunk_data in chunk_generator:
-                task = pool.apply_async(process_chunk_wrapper, (chunk_data,))
-                tasks.append((chunk_data[1], task))
-                
-                if len(tasks) >= batch_size:
-                    for bytes_count, async_result in tasks:
-                        filtered_lines = async_result.get()  # Retrieve in submission order.
-                        for line in filtered_lines:
-                            if line.strip() == "":
-                                if last_line_empty:
-                                    continue
-                                else:
-                                    out_f.write(line)
-                                    last_line_empty = True
-                            else:
-                                out_f.write(line)
-                                last_line_empty = False
-                        processed_bytes += bytes_count
-                        update_progress(processed_bytes, total_size)
-                    tasks = []  # Clear the batch.
+    with open(input_file, 'r', encoding='utf-8') as in_f:
+        for line in in_f:
+            # First, check if the line should be removed by any removal pattern.
+            skip_due_to_removal = False
+            for pat in removal_patterns:
+                if pat.search(line):
+                    skip_due_to_removal = True
+                    break
+            if skip_due_to_removal:
+                continue  # Skip this line entirely.
             
-            # Process any remaining tasks.
-            for bytes_count, async_result in tasks:
-                filtered_lines = async_result.get()
-                for line in filtered_lines:
-                    if line.strip() == "":
-                        if last_line_empty:
-                            continue
+            # Attempt to extract a timestamp from the line.
+            m = timestamp_pattern.search(line)
+            if m:
+                try:
+                    line_ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    line_ts = None
+            else:
+                line_ts = None
+            
+            if not started_output:
+                # Buffer the line until we can decide based on a valid timestamp.
+                buffer.append(line)
+                if line_ts is not None:
+                    # A valid timestamp has been found in this block.
+                    # Decide whether to flush (output) or discard the buffered block.
+                    if from_timestamp is not None and line_ts < from_timestamp:
+                        # The block is older than FROM_TIMESTAMP;
+                        # discard the entire buffered block and continue.
+                        buffer = []
+                        continue
+                    if to_timestamp is not None and line_ts > to_timestamp:
+                        # The block is later than TO_TIMESTAMP;
+                        # stop processing further lines.
+                        buffer = []
+                        break
+                    # Otherwise, the block is in-range.
+                    # Flush the buffered lines to the output file.
+                    for buf_line in buffer:
+                        if buf_line.strip() == "":
+                            if last_line_empty:
+                                continue
+                            else:
+                                out_f.write(buf_line)
+                                last_line_empty = True
                         else:
-                            out_f.write(line)
-                            last_line_empty = True
+                            out_f.write(buf_line)
+                            last_line_empty = False
+                    buffer = []  # Clear the buffer.
+                    started_output = True
+            else:
+                # Already in output mode.
+                # If this line has a valid timestamp, check if it exceeds TO_TIMESTAMP.
+                if line_ts is not None and to_timestamp is not None and line_ts > to_timestamp:
+                    # Stop processing further lines.
+                    break
+                # Write the line directly.
+                if line.strip() == "":
+                    if last_line_empty:
+                        continue
                     else:
                         out_f.write(line)
-                        last_line_empty = False
-                processed_bytes += bytes_count
-                update_progress(processed_bytes, total_size)
-    finally:
-        pool.close()
-        pool.join()
-        out_f.close()
+                        last_line_empty = True
+                else:
+                    out_f.write(line)
+                    last_line_empty = False
+        # End of file reached.
+        # If output mode was never started (no valid timestamp found) flush buffer.
+        if not started_output and buffer:
+            for buf_line in buffer:
+                if buf_line.strip() == "":
+                    if last_line_empty:
+                        continue
+                    else:
+                        out_f.write(buf_line)
+                        last_line_empty = True
+                else:
+                    out_f.write(buf_line)
+                    last_line_empty = False
     
+    out_f.close()
     sys.stdout.write("\nFiltering complete. Output saved to: " + output_file + "\n")
 
 if __name__ == '__main__':
     main()
 
-r"""
+"""
 ===========================
 output_folder = D:\
 chunk_size = 1000
-num_cpus = 2
 FROM_TIMESTAMP = 2023-01-01 00:00:00
 TO_TIMESTAMP = 2023-12-31 23:59:59
 regexp_pattern =
