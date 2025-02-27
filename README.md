@@ -4,15 +4,15 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.1.0
+Version: 1.1.2
 
 This script filters a large log file by removing lines based on two criteria:
   1. Removal regex patterns (specified in the config)
   2. Timestamp filtering – only lines whose timestamp (extracted via a regex)
      falls within a configured FROM_TIMESTAMP and TO_TIMESTAMP range are kept.
 
-For parallel processing, the file is first split into chunks at "safe boundaries."
-A safe boundary is defined as a split point where two consecutive lines both yield a
+For parallel processing, the file is split into chunks at "safe boundaries."
+A safe boundary is defined as a point where two consecutive lines both yield a
 valid timestamp (according to the expected log format).
 
 Each chunk is processed in parallel:
@@ -24,7 +24,6 @@ Each chunk is processed in parallel:
   - Two consecutive empty lines are not written.
   
 After processing, chunks are merged in order and written to the output file.
-
 Progress is printed (in percentage) based on the file’s byte size.
 
 Usage: file_log.py <log_file>
@@ -38,19 +37,20 @@ import re
 from datetime import datetime
 import multiprocessing
 
-# --- Global: Timestamp extraction regex for safe-boundary and processing ---
-# Expected sample log line:
+# --- Global: Timestamp extraction regex ---
+# Based on the sample log line:
 # "ObjMgr Debug 5 123422222234c34f:0 2025-02-26 03:02:22"
-# This regex expects:
-#   - Two non-space tokens, a single digit,
-#   - A 16-character hexadecimal code, a colon and a digit,
-#   - Then a timestamp in the format "YYYY-MM-DD HH:MM:SS" (captured in group 1)
+# Expected format:
+#   <text> <text> <digit> <16 hex digits>:<digit> <timestamp>
 TIMESTAMP_REGEX = re.compile(
     r"^\S+\s+\S+\s+\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})"
 )
 
-# --- Helper: Extract timestamp from a line ---
 def extract_timestamp(line):
+    """
+    Extracts and returns the datetime object from a log line using TIMESTAMP_REGEX.
+    Returns None if no valid timestamp is found.
+    """
     m = TIMESTAMP_REGEX.search(line)
     if m:
         try:
@@ -59,7 +59,6 @@ def extract_timestamp(line):
             return None
     return None
 
-# --- Configuration Parser ---
 def parse_config():
     """
     Reads this script file (__file__) to extract configuration settings.
@@ -76,7 +75,7 @@ def parse_config():
       ^.*Another pattern to filter.*$
       ^.*\[KEY\]$
       
-    Returns a dictionary with static parameters and a key "patterns" (a list of removal regex strings).
+    Returns a dictionary with static parameters and a key "patterns" containing a list of removal regex strings.
     """
     config = {}
     patterns = []
@@ -99,7 +98,7 @@ def parse_config():
         if inside_config:
             config_section.append(line.strip())
     
-    in_patterns = False
+    in_patterns = False  # Indicates that subsequent lines are regex patterns.
     for line in config_section:
         if not line:
             continue
@@ -109,7 +108,7 @@ def parse_config():
                 key = key.strip()
                 value = value.strip()
                 if key == "regexp_pattern":
-                    in_patterns = True
+                    in_patterns = True  # Switch to reading regex patterns.
                 else:
                     try:
                         config[key] = int(value)
@@ -122,53 +121,45 @@ def parse_config():
     config["patterns"] = patterns
     return config
 
-# --- Chunking Function ---
 def chunk_file(filename, baseline=1000):
     """
-    Splits the file into chunks. Starts with a baseline number of lines and then extends
-    until a safe boundary is reached, defined as the point where the last two lines both
-    yield a valid timestamp.
+    Splits the file into chunks.
+    Starts with a baseline number of lines and then extends the chunk until a safe boundary is reached,
+    defined as the point where the last two lines both yield a valid timestamp.
     
     Yields tuples of (chunk_index, list_of_lines).
     """
-    total_size = os.path.getsize(filename)
-    processed_bytes = 0
     chunk_index = 0
     current_chunk = []
-    
     with open(filename, 'r', encoding='utf-8') as f:
         for line in f:
-            processed_bytes += len(line.encode('utf-8'))
             current_chunk.append(line)
-            # If baseline reached, try to extend to a safe boundary.
             if len(current_chunk) >= baseline:
                 if len(current_chunk) >= 2:
                     ts1 = extract_timestamp(current_chunk[-2])
                     ts2 = extract_timestamp(current_chunk[-1])
                     if ts1 is not None and ts2 is not None:
-                        # Safe boundary reached.
                         yield (chunk_index, current_chunk)
                         chunk_index += 1
                         current_chunk = []
         if current_chunk:
             yield (chunk_index, current_chunk)
 
-# --- Worker Function for Processing a Chunk ---
 def process_chunk(args):
     """
     Processes a single chunk.
-    
+
     Args:
       args: A tuple (chunk_index, lines, config)
-      
+
     Returns:
       (chunk_index, list of output lines)
-      
+
     Processing logic:
       - Discard the chunk if its first valid timestamp (from the first line that yields one)
         is older than FROM_TIMESTAMP.
       - Process each line:
-            * Skip line if any removal pattern matches.
+            * Skip the line if any removal pattern matches.
             * If the line contains a valid timestamp and it exceeds TO_TIMESTAMP,
               stop processing further lines in the chunk.
             * Otherwise, include the line (avoiding two consecutive empty lines).
@@ -187,10 +178,10 @@ def process_chunk(args):
             to_ts = datetime.strptime(config["TO_TIMESTAMP"].strip(), "%Y-%m-%d %H:%M:%S")
     except Exception:
         pass
-    
+
     output_lines = []
     last_line_empty = False
-    
+
     # Determine the first valid timestamp in the chunk.
     first_ts = None
     for line in lines:
@@ -201,10 +192,9 @@ def process_chunk(args):
     if first_ts is not None and from_ts and first_ts < from_ts:
         # Entire chunk is too old.
         return (chunk_index, [])
-    
+
     # Process lines sequentially.
     for line in lines:
-        # Apply removal patterns.
         skip = False
         for pat in removal_patterns:
             if pat.search(line):
@@ -216,7 +206,6 @@ def process_chunk(args):
         if ts is not None and to_ts and ts > to_ts:
             # Stop processing this chunk if a line's timestamp exceeds TO_TIMESTAMP.
             break
-        # Avoid consecutive empty lines.
         if line.strip() == "":
             if last_line_empty:
                 continue
@@ -228,7 +217,6 @@ def process_chunk(args):
             last_line_empty = False
     return (chunk_index, output_lines)
 
-# --- Main Function ---
 def main():
     """
     Main function:
@@ -245,46 +233,38 @@ def main():
     if not os.path.isfile(input_file):
         print(f"Error: File '{input_file}' does not exist.")
         sys.exit(1)
-    
+
     config = parse_config()
     output_folder = config.get("output_folder", ".")
     if not output_folder.endswith("\\") and not output_folder.endswith("/"):
         output_folder += os.sep
     base_name = os.path.basename(input_file)
     output_file = os.path.join(output_folder, base_name + ".filtered.log")
-    
-    total_size = os.path.getsize(input_file)
-    processed_bytes = 0
 
-    # --- Chunk the file ---
-    chunks = []
     print("Chunking file ...")
+    chunks = []
     for chunk_info in chunk_file(input_file, baseline=1000):
         chunks.append(chunk_info)
     print(f"Total chunks created: {len(chunks)}")
-    
-    # --- Process chunks in parallel ---
+
     pool = multiprocessing.Pool(processes=config.get("num_cpus", 2))
-    # Prepare arguments as tuples (chunk_index, lines, config)
     args = [(idx, lines, config) for (idx, lines) in chunks]
     results = pool.map(process_chunk, args)
     pool.close()
     pool.join()
-    
-    # --- Merge results in order ---
+
     results.sort(key=lambda x: x[0])
     merged_lines = []
     for idx, lines in results:
         merged_lines.extend(lines)
-    
-    # --- Write merged output ---
+
     try:
         with open(output_file, 'w', encoding='utf-8') as out_f:
             out_f.writelines(merged_lines)
     except Exception as e:
         print(f"Error: Could not open output file '{output_file}' for writing: {e}")
         sys.exit(1)
-    
+
     print(f"\nFiltering complete. Output saved to: {output_file}")
 
 if __name__ == '__main__':
