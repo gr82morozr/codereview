@@ -4,7 +4,7 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.0.2
+Version: 1.0.3
 
 This script filters a large log file by removing lines based on two criteria:
   1. Removal regex patterns (specified in the config)
@@ -39,8 +39,8 @@ def parse_config():
     Reads this script file (__file__) to extract configuration settings.
     The configuration is placed at the bottom of the script between two lines that exactly match
     "===========================".
-    
-    Expected configuration format example:
+
+    Expected configuration format example (the config block is defined as a raw string):
       output_folder = D:\
       chunk_size = 1000
       FROM_TIMESTAMP = 2023-01-01 00:00:00
@@ -52,7 +52,7 @@ def parse_config():
       
     Returns:
       A dictionary with static parameters and a key "patterns" containing a list of regex strings.
-      (Note: the patterns are taken exactly as specified in the config.)
+      (Note: The patterns are taken exactly as specified in the config.)
     """
     config = {}
     patterns = []
@@ -62,7 +62,7 @@ def parse_config():
     except Exception as e:
         print("Error reading script file for configuration:", e)
         sys.exit(1)
-    
+
     config_section = []
     inside_config = False
     for line in lines:
@@ -74,7 +74,7 @@ def parse_config():
                 break
         if inside_config:
             config_section.append(line.strip())
-    
+
     in_patterns = False  # Indicates that subsequent lines are regex patterns.
     for line in config_section:
         if not line:
@@ -166,9 +166,15 @@ def main():
     # Compile removal patterns exactly as provided.
     removal_patterns = [re.compile(p) for p in patterns]
     
-    # Compile the timestamp extraction regex.
-    # This regex is expected to capture a timestamp in the format "YYYY-MM-DD hh:mm:ss" in group(1).
-    timestamp_pattern = re.compile(r"^\w+\s+\w+\s+\d+\w{16}\:\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
+    # Updated timestamp extraction regex.
+    # Based on the sample log line:
+    # "ObjMgr Debug 5 123422222234c34f:0 2025-02-26 03:02:22"
+    # The expected format is:
+    #   <text> <text> <digit> <16 hex digits>:<digit> <timestamp>
+    # The regex below captures the timestamp (group 1) in the format "YYYY-MM-DD HH:MM:SS"
+    timestamp_pattern = re.compile(
+        r"^\S+\s+\S+\s+\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})"
+    )
     
     try:
         out_f = open(output_file, 'w', encoding='utf-8')
@@ -282,7 +288,6 @@ regexp_pattern =
 ^.*\[KEY\]$
 ===========================
 """
-
 
 
 ```
