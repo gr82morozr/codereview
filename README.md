@@ -4,7 +4,7 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.0.3b
+Version: 1.0.3
 
 This script filters a large log file by removing lines based on two criteria:
   1. Removal regex patterns (specified in the config)
@@ -41,7 +41,7 @@ def parse_config():
     "===========================".
 
     Expected configuration format example (the config block is defined as a raw string):
-      output_folder = D:\\
+      output_folder = D:\
       chunk_size = 1000
       FROM_TIMESTAMP = 2023-01-01 00:00:00
       TO_TIMESTAMP = 2023-12-31 23:59:59
@@ -171,7 +171,7 @@ def main():
     # "ObjMgr Debug 5 123422222234c34f:0 2025-02-26 03:02:22"
     # The expected format is:
     #   <text> <text> <digit> <16 hex digits>:<digit> <timestamp>
-    # This regex captures the timestamp (group 1) in the format "YYYY-MM-DD HH:MM:SS"
+    # The regex below captures the timestamp (group 1) in the format "YYYY-MM-DD HH:MM:SS"
     timestamp_pattern = re.compile(
         r"^\S+\s+\S+\s+\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})"
     )
@@ -277,7 +277,7 @@ if __name__ == '__main__':
 
 r"""
 ===========================
-output_folder = D:\\
+output_folder = D:\
 chunk_size = 1000
 num_cpus = 2
 FROM_TIMESTAMP = 2023-01-01 00:00:00
@@ -288,7 +288,6 @@ regexp_pattern =
 ^.*\[KEY\]$
 ===========================
 """
-
 
 
 ```
