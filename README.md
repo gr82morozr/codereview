@@ -4,7 +4,7 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.3.2
+Version: 1.3.3
 
 This script processes log files from multiple input folders and applies both file-level
 and content-level filtering according to configuration parameters and optional command-line
@@ -32,8 +32,8 @@ Configuration parameters (defined in the config block at the end) include:
 Usage:
   - With no command-line parameters, the script uses the config values.
   - Command-line overrides:
-       > "YYYY-MM-DD HH:MM:SS"   or   > -200   (i.e. FROM_TIMESTAMP = now - 200s)
-       < "YYYY-MM-DD HH:MM:SS"   or   < 200    (i.e. TO_TIMESTAMP = FROM_TIMESTAMP + 200s)
+       > "YYYY-MM-DD HH:MM:SS"   or   > -200    (i.e. FROM_TIMESTAMP = now - 200s)
+       < "YYYY-MM-DD HH:MM:SS"   or   < 200     (i.e. TO_TIMESTAMP = FROM_TIMESTAMP + 200s)
   - Example:
        python script.py > -200 < 10
          sets FROM_TIMESTAMP to (now - 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
@@ -51,8 +51,8 @@ Content-level filtering:
 
 After processing each file, the script prints the file name along with the original vs. filtered
 line counts. If no content remains after filtering, no output file is created.
-Additionally, while processing each file, progress (percentage of file bytes processed) is updated
-on the same line; once finished, that line is replaced with the file summary.
+Additionally, while processing each file, progress (percentage of file bytes processed)
+is updated on the same line; once finished, that line is replaced by the file summary.
 Finally, the total processing time is printed.
 """
 
@@ -155,7 +155,8 @@ def parse_config():
 # -----------------------
 # Timestamp Extraction
 # -----------------------
-# Updated as requested: using the pattern without the initial tokens.
+# Updated regex: now matching a digit followed by a space, then 16 hex digits, a colon, a digit,
+# then a space and the timestamp in format "YYYY-MM-DD HH:MM:SS".
 timestamp_pattern = re.compile(r"\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
 
 def extract_timestamp(line):
@@ -225,7 +226,7 @@ def process_file_content(input_file, from_ts, to_ts, config):
       - Discards all lines before the first line with a valid timestamp ≥ from_ts.
       - Stops processing when a line with a valid timestamp > to_ts is encountered.
       - Removes lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
-      - While processing, prints progress percentage (based on bytes processed) on the same line.
+      - Prints progress percentage (based on bytes processed) on the same line.
     Returns a tuple: (original_line_count, filtered_lines as list).
     """
     original_count = 0
@@ -233,17 +234,17 @@ def process_file_content(input_file, from_ts, to_ts, config):
     last_line_empty = False
     buffer = []
     started_output = False
-
-    content_exclude_patterns = [re.compile(p) for p in config.get("content_exclude", [])]
     total_size = os.path.getsize(input_file)
     processed_bytes = 0
+
+    content_exclude_patterns = [re.compile(p) for p in config.get("content_exclude", [])]
 
     with open(input_file, 'r', encoding='utf-8') as f:
         for line in f:
             original_count += 1
             processed_bytes += len(line.encode('utf-8'))
-            # Print progress for this file on the same line:
-            sys.stdout.write("\r    Progress: {:6.2f}%".format((processed_bytes/total_size)*100))
+            # Print progress for this file on the same line.
+            sys.stdout.write("\r    Progress: {:6.2f}%".format((processed_bytes / total_size) * 100))
             sys.stdout.flush()
             ts = extract_timestamp(line)
             if not started_output:
@@ -294,7 +295,8 @@ def process_file_content(input_file, from_ts, to_ts, config):
             else:
                 filtered_lines.append(buf_line)
                 last_line_empty = False
-    # Clear progress line and print file summary progress for this file
+
+    # Clear progress line and then print file summary later.
     sys.stdout.write("\r" + " " * 50 + "\r")
     return original_count, filtered_lines
 
@@ -370,7 +372,6 @@ def main():
         print("No INPUT_FOLDERS specified in config. Exiting.")
         sys.exit(0)
     
-    # Process each file in each input folder sequentially.
     for folder in input_folders:
         if not os.path.isdir(folder):
             print(f"Warning: '{folder}' is not a valid directory. Skipping.")
@@ -380,12 +381,9 @@ def main():
             if os.path.isfile(full_path):
                 if not file_level_filter(full_path, config):
                     continue
-                # Refresh the console line with the file name being processed.
-                sys.stdout.write("\rProcessing file: " + full_path + " " * 20)
-                sys.stdout.flush()
+                # Print file name being processed (and keep it visible)
+                print(f"\nProcessing file: {full_path}")
                 orig_count, filtered_lines = process_file_content(full_path, from_ts, to_ts, config)
-                # Clear the current line.
-                sys.stdout.write("\r" + " " * 80 + "\r")
                 if len(filtered_lines) == 0:
                     print(f"{full_path} : {orig_count} => 0 (Filtered out completely)")
                 else:
