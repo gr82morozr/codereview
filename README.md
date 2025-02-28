@@ -4,10 +4,10 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.3.0
+Version: 1.3.1
 
-This script processes log files from multiple input folders and applies both file‑level
-and content‑level filtering according to configuration parameters and optional command‑line
+This script processes log files from multiple input folders and applies both file-level
+and content-level filtering according to configuration parameters and optional command-line
 overrides.
 
 Configuration parameters (defined in the config block at the end) include:
@@ -30,27 +30,28 @@ Configuration parameters (defined in the config block at the end) include:
     ^.*\[KEY\].*$
     
 Usage:
-  - When no command‑line parameters are supplied, the script uses the config values.
-  - Command‑line overrides:
-      > "YYYY-MM-DD HH:MM:SS"   or   > -200    (meaning FROM_TIMESTAMP = now - 200s)
-      < "YYYY-MM-DD HH:MM:SS"   or   < 200     (meaning TO_TIMESTAMP = FROM_TIMESTAMP + 200s)
+  - With no command-line parameters, the script uses the config values.
+  - Command-line overrides:
+       > "YYYY-MM-DD HH:MM:SS"   or   > -200    (i.e. FROM_TIMESTAMP = now - 200s)
+       < "YYYY-MM-DD HH:MM:SS"   or   < 200     (i.e. TO_TIMESTAMP = FROM_TIMESTAMP + 200s)
   - Example:
-      python script.py > -200 < 10
-        sets FROM_TIMESTAMP to (now - 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
+       python script.py > -200 < 10
+         sets FROM_TIMESTAMP to (now - 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
 
-File‑level filtering:
+File-level filtering:
   1. Skip file if its last modified time is older than FROM_TIMESTAMP.
-  2. Skip file if its name does not match any pattern from FILE_NAME_INCLUDE_REGEXP_PATTERN.
-  3. Skip file if it does not contain at least one line matching FILE_INCLUDE_REGEXP_PATTERN.
+  2. If FILE_NAME_INCLUDE_REGEXP_PATTERN is provided (non-empty), file name must match at least one pattern.
+  3. If FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), file must contain at least one matching line.
+     (If these patterns are empty, all files are included.)
 
-Content‑level filtering:
+Content-level filtering:
   - Discard all lines before the first line with a valid timestamp ≥ FROM_TIMESTAMP.
   - Stop processing lines once a line with a valid timestamp > TO_TIMESTAMP is encountered.
   - Remove lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
 
 After processing each file, the script prints the file name and the original vs. filtered line counts.
 If no content remains after filtering, no output file is created.
-Finally, the script prints the total processing time.
+Finally, the total processing time is printed.
 """
 
 import os
@@ -92,7 +93,6 @@ def parse_config():
     Returns a dictionary.
     """
     config = {}
-    # Lists for multi-line values:
     file_name_include = []
     file_include = []
     content_exclude = []
@@ -125,7 +125,6 @@ def parse_config():
             key = key.strip().upper()
             value = value.strip()
             if key == "INPUT_FOLDERS":
-                # Split by '|' or comma
                 folders = re.split(r'\s*[,\|]\s*', value)
                 config["input_folders"] = [fld.strip() for fld in folders if fld.strip()]
             elif key == "OUTPUT_FOLDER":
@@ -144,7 +143,6 @@ def parse_config():
             else:
                 config[key.lower()] = value
         else:
-            # Continuation line for multi-line keys
             if current_key in ("file_name_include", "file_include", "content_exclude"):
                 config[current_key].append(line)
     for key in ("input_folders", "file_name_include", "file_include", "content_exclude"):
@@ -171,92 +169,15 @@ def extract_timestamp(line):
     return None
 
 # -----------------------
-# Content Filtering
-# -----------------------
-def process_file_content(input_file, from_ts, to_ts, config):
-    """
-    Processes one file's content.
-      - Reads all lines and counts original lines.
-      - Buffers lines until a valid timestamp is found.
-      - Discards all lines before the first line with a valid timestamp >= from_ts.
-      - Stops processing when a line with a timestamp > to_ts is encountered.
-      - Removes lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
-    Returns (original_line_count, filtered_lines as list).
-    """
-    original_count = 0
-    filtered_lines = []
-    last_line_empty = False
-    buffer = []
-    started_output = False
-
-    content_exclude_patterns = [re.compile(p) for p in config.get("content_exclude", [])]
-
-    with open(input_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            original_count += 1
-            ts = extract_timestamp(line)
-            if not started_output:
-                buffer.append(line)
-                if ts is not None:
-                    if from_ts and ts < from_ts:
-                        buffer = []
-                        continue
-                    # Flush the buffer
-                    for buf_line in buffer:
-                        skip = any(p.search(buf_line) for p in content_exclude_patterns)
-                        if skip:
-                            continue
-                        if buf_line.strip() == "":
-                            if last_line_empty:
-                                continue
-                            else:
-                                filtered_lines.append(buf_line)
-                                last_line_empty = True
-                        else:
-                            filtered_lines.append(buf_line)
-                            last_line_empty = False
-                    buffer = []
-                    started_output = True
-            else:
-                if ts is not None and to_ts and ts > to_ts:
-                    break
-                skip = any(p.search(line) for p in content_exclude_patterns)
-                if skip:
-                    continue
-                if line.strip() == "":
-                    if last_line_empty:
-                        continue
-                    else:
-                        filtered_lines.append(line)
-                        last_line_empty = True
-                else:
-                    filtered_lines.append(line)
-                    last_line_empty = False
-    if not started_output and buffer:
-        for buf_line in buffer:
-            skip = any(p.search(buf_line) for p in content_exclude_patterns)
-            if skip:
-                continue
-            if buf_line.strip() == "":
-                if last_line_empty:
-                    continue
-                else:
-                    filtered_lines.append(buf_line)
-                    last_line_empty = True
-            else:
-                filtered_lines.append(buf_line)
-                last_line_empty = False
-    return original_count, filtered_lines
-
-# -----------------------
 # File-Level Filtering
 # -----------------------
 def file_level_filter(input_file, config):
     """
     Performs file-level filtering:
       - Checks file's last modified time.
-      - Checks if file name matches any pattern from FILE_NAME_INCLUDE_REGEXP_PATTERN (case-insensitive).
-      - Checks if file contains at least one line matching FILE_INCLUDE_REGEXP_PATTERN.
+      - If FILE_NAME_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file name must match at least one pattern.
+      - If FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file must contain at least one matching line.
+    If these patterns are empty, the file passes that check.
     Returns True if the file should be processed; otherwise False.
     """
     mtime = os.path.getmtime(input_file)
@@ -292,14 +213,91 @@ def file_level_filter(input_file, config):
     return True
 
 # -----------------------
+# Content Filtering
+# -----------------------
+def process_file_content(input_file, from_ts, to_ts, config):
+    """
+    Processes the content of one file:
+      - Reads all lines and counts original lines.
+      - Buffers lines until a valid timestamp is found.
+      - Discards all lines before the first line with a valid timestamp >= from_ts.
+      - Stops processing when a line with a valid timestamp > to_ts is encountered.
+      - Removes lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
+    Returns a tuple: (original_line_count, filtered_lines as list).
+    """
+    original_count = 0
+    filtered_lines = []
+    last_line_empty = False
+    buffer = []
+    started_output = False
+
+    content_exclude_patterns = [re.compile(p) for p in config.get("content_exclude", [])]
+
+    with open(input_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            original_count += 1
+            ts = extract_timestamp(line)
+            if not started_output:
+                buffer.append(line)
+                if ts is not None:
+                    if from_ts and ts < from_ts:
+                        buffer = []
+                        continue
+                    # Flush buffer
+                    for buf_line in buffer:
+                        if any(p.search(buf_line) for p in content_exclude_patterns):
+                            continue
+                        if buf_line.strip() == "":
+                            if last_line_empty:
+                                continue
+                            else:
+                                filtered_lines.append(buf_line)
+                                last_line_empty = True
+                        else:
+                            filtered_lines.append(buf_line)
+                            last_line_empty = False
+                    buffer = []
+                    started_output = True
+            else:
+                if ts is not None and to_ts and ts > to_ts:
+                    break
+                if any(p.search(line) for p in content_exclude_patterns):
+                    continue
+                if line.strip() == "":
+                    if last_line_empty:
+                        continue
+                    else:
+                        filtered_lines.append(line)
+                        last_line_empty = True
+                else:
+                    filtered_lines.append(line)
+                    last_line_empty = False
+    if not started_output and buffer:
+        for buf_line in buffer:
+            if any(p.search(buf_line) for p in content_exclude_patterns):
+                continue
+            if buf_line.strip() == "":
+                if last_line_empty:
+                    continue
+                else:
+                    filtered_lines.append(buf_line)
+                    last_line_empty = True
+            else:
+                filtered_lines.append(buf_line)
+                last_line_empty = False
+
+    return original_count, filtered_lines
+
+# -----------------------
 # Compute Timestamps with Overrides
 # -----------------------
 def compute_overridden_timestamps(from_override, to_override, config):
     """
-    Computes final FROM and TO timestamps based on config and command-line overrides.
-    Override values may be absolute timestamps or relative (numeric, in seconds).
-    If TO is empty, defaults to now.
-    Returns (from_ts, to_ts) as datetime objects.
+    Computes final FROM and TO timestamps based on:
+      - The config values.
+      - Command-line overrides.
+    The override values may be full timestamps (YYYY-MM-DD HH:MM:SS) or relative (seconds offset).
+    Returns a tuple (from_ts, to_ts) as datetime objects.
     Exits if TO < FROM.
     """
     now = datetime.now()
@@ -326,7 +324,7 @@ def compute_overridden_timestamps(from_override, to_override, config):
             try:
                 from_ts = datetime.strptime(from_override, "%Y-%m-%d %H:%M:%S")
             except Exception:
-                print("Error: Invalid FROM_TIMESTAMP override.")
+                print("Error: Invalid FROM_TIMESTAMP override format.")
                 sys.exit(1)
     if to_override is not None:
         if re.fullmatch(r"-?\d+", to_override):
@@ -338,7 +336,7 @@ def compute_overridden_timestamps(from_override, to_override, config):
             try:
                 to_ts = datetime.strptime(to_override, "%Y-%m-%d %H:%M:%S")
             except Exception:
-                print("Error: Invalid TO_TIMESTAMP override.")
+                print("Error: Invalid TO_TIMESTAMP override format.")
                 sys.exit(1)
     if to_ts is None:
         to_ts = now
@@ -357,7 +355,7 @@ def main():
     from_ts, to_ts = compute_overridden_timestamps(*parse_command_line_args(), config)
     config["FROM_TIMESTAMP"] = from_ts.strftime("%Y-%m-%d %H:%M:%S") if from_ts else ""
     config["TO_TIMESTAMP"] = to_ts.strftime("%Y-%m-%d %H:%M:%S") if to_ts else ""
-    
+
     input_folders = config.get("input_folders", [])
     if not input_folders:
         print("No INPUT_FOLDERS specified in config. Exiting.")
@@ -372,7 +370,6 @@ def main():
             if os.path.isfile(full_path):
                 if not file_level_filter(full_path, config):
                     continue
-                # Check file modified time (already done in file_level_filter)
                 print(f"\nProcessing file: {full_path}")
                 orig_count, filtered_lines = process_file_content(full_path, from_ts, to_ts, config)
                 if len(filtered_lines) == 0:
@@ -414,6 +411,7 @@ CONTENT_EXCLUDE_REGEXP_PATTERN =
 ^.*\[KEY\].*$
 ===========================
 """
+
 
 
 
