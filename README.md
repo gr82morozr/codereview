@@ -4,7 +4,7 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.3.3
+Version: 1.3.3b
 
 This script processes log files from multiple input folders and applies both file-level
 and content-level filtering according to configuration parameters and optional command-line
@@ -51,8 +51,8 @@ Content-level filtering:
 
 After processing each file, the script prints the file name along with the original vs. filtered
 line counts. If no content remains after filtering, no output file is created.
-Additionally, while processing each file, progress (percentage of file bytes processed)
-is updated on the same line; once finished, that line is replaced by the file summary.
+Additionally, during file-level filtering the file name is printed on one line and refreshed;
+while processing file content, progress (percentage of file bytes processed) is updated on the same line.
 Finally, the total processing time is printed.
 """
 
@@ -155,8 +155,7 @@ def parse_config():
 # -----------------------
 # Timestamp Extraction
 # -----------------------
-# Updated regex: now matching a digit followed by a space, then 16 hex digits, a colon, a digit,
-# then a space and the timestamp in format "YYYY-MM-DD HH:MM:SS".
+# Updated regex as requested.
 timestamp_pattern = re.compile(r"\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
 
 def extract_timestamp(line):
@@ -244,7 +243,7 @@ def process_file_content(input_file, from_ts, to_ts, config):
             original_count += 1
             processed_bytes += len(line.encode('utf-8'))
             # Print progress for this file on the same line.
-            sys.stdout.write("\r    Progress: {:6.2f}%".format((processed_bytes / total_size) * 100))
+            sys.stdout.write("\r    Progress: {:6.2f}%".format((processed_bytes/total_size)*100))
             sys.stdout.flush()
             ts = extract_timestamp(line)
             if not started_output:
@@ -296,7 +295,7 @@ def process_file_content(input_file, from_ts, to_ts, config):
                 filtered_lines.append(buf_line)
                 last_line_empty = False
 
-    # Clear progress line and then print file summary later.
+    # Clear progress line
     sys.stdout.write("\r" + " " * 50 + "\r")
     return original_count, filtered_lines
 
@@ -379,11 +378,19 @@ def main():
         for fname in os.listdir(folder):
             full_path = os.path.join(folder, fname)
             if os.path.isfile(full_path):
+                # Print file name for file-level filtering; update same line.
+                sys.stdout.write("\rProcessing file: " + full_path + "    ")
+                sys.stdout.flush()
                 if not file_level_filter(full_path, config):
+                    # Clear line and refresh.
+                    sys.stdout.write("\r" + " " * 80 + "\r")
                     continue
-                # Print file name being processed (and keep it visible)
-                print(f"\nProcessing file: {full_path}")
+                # File-level filtering passed; now process content.
+                sys.stdout.write("\rProcessing file: " + full_path + "    ")
+                sys.stdout.flush()
                 orig_count, filtered_lines = process_file_content(full_path, from_ts, to_ts, config)
+                # Clear line
+                sys.stdout.write("\r" + " " * 80 + "\r")
                 if len(filtered_lines) == 0:
                     print(f"{full_path} : {orig_count} => 0 (Filtered out completely)")
                 else:
@@ -423,6 +430,7 @@ CONTENT_EXCLUDE_REGEXP_PATTERN =
 ^.*\[KEY\].*$
 ===========================
 """
+
 
 
 
