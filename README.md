@@ -4,56 +4,41 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.3.3b
+Version: 1.3.4
 
-This script processes log files from multiple input folders and applies both file-level
-and content-level filtering according to configuration parameters and optional command-line
-overrides.
+This script processes log files from multiple input folders in parallel using a worker pool.
+The number of CPU cores (workers) is read from the configuration via the key CPU_CORES.
 
-Configuration parameters (defined in the config block at the end) include:
-  INPUT_FOLDERS             = X:\ | W:\
-  OUTPUT_FOLDER             = D:\temp\log
+File-level filtering is performed first:
+  - The file’s last modified time must be ≥ FROM_TIMESTAMP.
+  - If FILE_NAME_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file name must match at least one pattern.
+  - If FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file must contain at least one matching line.
+If these checks fail, the file is skipped.
 
-  FROM_TIMESTAMP            = 2025-02-28 15:35:00
-  TO_TIMESTAMP              = 2025-02-28 15:40:00
+For files that pass file-level filtering, content-level filtering is performed sequentially:
+  - All lines before the first line with a valid timestamp ≥ FROM_TIMESTAMP are discarded.
+  - Processing stops once a line with a valid timestamp > TO_TIMESTAMP is encountered.
+  - Lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN are removed.
 
-  FILE_NAME_INCLUDE_REGEXP_PATTERN =
-    JMSOutboundder.*\.log
-    EAIAdapter.*\.XML
+While processing each file, each worker updates a shared dictionary with its slot’s progress in the format:
+  Core <ID>: <filename> - <progress>% 
+These N (CPU_CORES) lines are refreshed continuously by the main process (without scrolling the console).
+After a file is processed, a summary line (showing original and filtered line counts) replaces that slot’s progress.
 
-  FILE_INCLUDE_REGEXP_PATTERN =
-    ^.*my critical line here.*$
-    ^.*my 2nd critical line here.*$
+Command‑line overrides (using arguments starting with “>” for FROM_TIMESTAMP and “<” for TO_TIMESTAMP)
+allow dynamic timestamp settings. Relative values (in seconds) are supported.
 
-  CONTENT_EXCLUDE_REGEXP_PATTERN =
-    ^.*Begin: Fetch the line.*$
-    ^.*\[KEY\].*$
-    
-Usage:
-  - With no command-line parameters, the script uses the config values.
-  - Command-line overrides:
-       > "YYYY-MM-DD HH:MM:SS"   or   > -200    (i.e. FROM_TIMESTAMP = now - 200s)
-       < "YYYY-MM-DD HH:MM:SS"   or   < 200     (i.e. TO_TIMESTAMP = FROM_TIMESTAMP + 200s)
-  - Example:
-       python script.py > -200 < 10
-         sets FROM_TIMESTAMP to (now - 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
+If a file’s filtered content is empty, no output file is created.
 
-File-level filtering:
-  1. Skip file if its last modified time is older than FROM_TIMESTAMP.
-  2. If FILE_NAME_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file name must match at least one pattern.
-  3. If FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file must contain at least one matching line.
-     (If these patterns are empty, all files are included.)
-
-Content-level filtering:
-  - Discard all lines before the first line with a valid timestamp ≥ FROM_TIMESTAMP.
-  - Stop processing lines once a line with a valid timestamp > TO_TIMESTAMP is encountered.
-  - Remove lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
-
-After processing each file, the script prints the file name along with the original vs. filtered
-line counts. If no content remains after filtering, no output file is created.
-Additionally, during file-level filtering the file name is printed on one line and refreshed;
-while processing file content, progress (percentage of file bytes processed) is updated on the same line.
 Finally, the total processing time is printed.
+
+Usage:
+  python script.py [> <FROM_OVERRIDE>] [< <TO_OVERRIDE>]
+
+For example:
+  python script.py > -200 < 10
+  sets FROM_TIMESTAMP to (now – 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
+
 """
 
 import os
@@ -61,6 +46,7 @@ import sys
 import re
 import time
 from datetime import datetime, timedelta
+from multiprocessing import Process, Manager, Queue
 
 # -----------------------
 # Command-line override parsing
@@ -89,7 +75,7 @@ def parse_config():
     """
     Reads configuration from this script file between "===========================" lines.
     Supports keys:
-      INPUT_FOLDERS, OUTPUT_FOLDER, FROM_TIMESTAMP, TO_TIMESTAMP,
+      INPUT_FOLDERS, OUTPUT_FOLDER, FROM_TIMESTAMP, TO_TIMESTAMP, CPU_CORES,
       FILE_NAME_INCLUDE_REGEXP_PATTERN, FILE_INCLUDE_REGEXP_PATTERN,
       CONTENT_EXCLUDE_REGEXP_PATTERN.
     Returns a dictionary.
@@ -127,11 +113,12 @@ def parse_config():
             key = key.strip().upper()
             value = value.strip()
             if key == "INPUT_FOLDERS":
+                # Split by '|' or comma.
                 folders = re.split(r'\s*[,\|]\s*', value)
                 config["input_folders"] = [fld.strip() for fld in folders if fld.strip()]
             elif key == "OUTPUT_FOLDER":
                 config["output_folder"] = value
-            elif key in ("FROM_TIMESTAMP", "TO_TIMESTAMP"):
+            elif key in ("FROM_TIMESTAMP", "TO_TIMESTAMP", "CPU_CORES"):
                 config[key] = value
             elif key == "FILE_NAME_INCLUDE_REGEXP_PATTERN":
                 current_key = "file_name_include"
@@ -155,7 +142,8 @@ def parse_config():
 # -----------------------
 # Timestamp Extraction
 # -----------------------
-# Updated regex as requested.
+# Updated regex: Now matching a digit, a space, then 16 hex digits, a colon, a digit,
+# a space, then capturing the timestamp in format "YYYY-MM-DD HH:MM:SS".
 timestamp_pattern = re.compile(r"\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
 
 def extract_timestamp(line):
@@ -179,7 +167,6 @@ def file_level_filter(input_file, config):
       - Checks file's last modified time.
       - If FILE_NAME_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file name must match at least one pattern.
       - If FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file must contain at least one matching line.
-    If these patterns are empty, the file passes that check.
     Returns True if the file should be processed; otherwise False.
     """
     mtime = os.path.getmtime(input_file)
@@ -215,17 +202,16 @@ def file_level_filter(input_file, config):
     return True
 
 # -----------------------
-# Content Filtering
+# Content Filtering with Progress Callback (for MP)
 # -----------------------
-def process_file_content(input_file, from_ts, to_ts, config):
+def process_file_content_mp(input_file, from_ts, to_ts, config, progress_callback):
     """
-    Processes one file's content:
-      - Reads all lines and counts original lines.
-      - Buffers lines until a valid timestamp is found.
-      - Discards all lines before the first line with a valid timestamp ≥ from_ts.
-      - Stops processing when a line with a valid timestamp > to_ts is encountered.
-      - Removes lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
-      - Prints progress percentage (based on bytes processed) on the same line.
+    Processes one file's content and calls progress_callback(percentage) with progress.
+    - Reads all lines and counts original lines.
+    - Buffers lines until a valid timestamp is found.
+    - Discards lines before the first line with a valid timestamp ≥ from_ts.
+    - Stops processing when a line with a valid timestamp > to_ts is encountered.
+    - Removes lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
     Returns a tuple: (original_line_count, filtered_lines as list).
     """
     original_count = 0
@@ -242,9 +228,8 @@ def process_file_content(input_file, from_ts, to_ts, config):
         for line in f:
             original_count += 1
             processed_bytes += len(line.encode('utf-8'))
-            # Print progress for this file on the same line.
-            sys.stdout.write("\r    Progress: {:6.2f}%".format((processed_bytes/total_size)*100))
-            sys.stdout.flush()
+            percentage = (processed_bytes / total_size) * 100
+            progress_callback(percentage)
             ts = extract_timestamp(line)
             if not started_output:
                 buffer.append(line)
@@ -252,7 +237,6 @@ def process_file_content(input_file, from_ts, to_ts, config):
                     if from_ts and ts < from_ts:
                         buffer = []
                         continue
-                    # Flush the buffer
                     for buf_line in buffer:
                         if any(p.search(buf_line) for p in content_exclude_patterns):
                             continue
@@ -294,9 +278,6 @@ def process_file_content(input_file, from_ts, to_ts, config):
             else:
                 filtered_lines.append(buf_line)
                 last_line_empty = False
-
-    # Clear progress line
-    sys.stdout.write("\r" + " " * 50 + "\r")
     return original_count, filtered_lines
 
 # -----------------------
@@ -357,6 +338,116 @@ def compute_overridden_timestamps(from_override, to_override, config):
     return from_ts, to_ts
 
 # -----------------------
+# Worker Process Function
+# -----------------------
+def worker_process(slot_id, file_queue, progress_dict, config, from_ts, to_ts):
+    """
+    Worker process:
+      Repeatedly gets a file from file_queue and processes it.
+      Updates progress_dict (shared Manager dictionary) for its slot (slot_id) with current progress.
+      For each file:
+         - Updates progress_dict[slot_id] with "Processing: <filename> - <percentage>%"
+         - Calls process_file_content_mp with a callback to update its progress.
+         - After processing, updates progress_dict[slot_id] with the summary:
+              either "<filename>: <orig> => <filtered>" or indicates filtered out.
+    """
+    while True:
+        try:
+            file = file_queue.get_nowait()
+        except Exception:
+            break
+        # Set initial progress.
+        progress_dict[slot_id] = f"Processing: {os.path.basename(file)} - 0.00%"
+        def progress_callback(p):
+            progress_dict[slot_id] = f"Processing: {os.path.basename(file)} - {p:.2f}%"
+        orig_count, filtered_lines = process_file_content_mp(file, from_ts, to_ts, config, progress_callback)
+        if len(filtered_lines) == 0:
+            progress_dict[slot_id] = f"{os.path.basename(file)}: {orig_count} => 0 (Filtered out)"
+        else:
+            out_folder = config.get("OUTPUT_FOLDER", ".")
+            if not out_folder.endswith("\\") and not out_folder.endswith("/"):
+                out_folder += os.sep
+            os.makedirs(out_folder, exist_ok=True)
+            out_file = os.path.join(out_folder, os.path.basename(file) + ".filtered.log")
+            with open(out_file, 'w', encoding='utf-8') as f_out:
+                f_out.writelines(filtered_lines)
+            progress_dict[slot_id] = f"{os.path.basename(file)}: {orig_count} => {len(filtered_lines)}"
+
+# -----------------------
+# Process File Content with Progress Callback for MP
+# -----------------------
+def process_file_content_mp(input_file, from_ts, to_ts, config, progress_callback):
+    """
+    Similar to process_file_content but uses progress_callback(percentage) instead of printing.
+    Returns (original_line_count, filtered_lines as list).
+    """
+    original_count = 0
+    filtered_lines = []
+    last_line_empty = False
+    buffer = []
+    started_output = False
+    total_size = os.path.getsize(input_file)
+    processed_bytes = 0
+
+    content_exclude_patterns = [re.compile(p) for p in config.get("content_exclude", [])]
+
+    with open(input_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            original_count += 1
+            processed_bytes += len(line.encode('utf-8'))
+            percentage = (processed_bytes / total_size) * 100
+            progress_callback(percentage)
+            ts = extract_timestamp(line)
+            if not started_output:
+                buffer.append(line)
+                if ts is not None:
+                    if from_ts and ts < from_ts:
+                        buffer = []
+                        continue
+                    for buf_line in buffer:
+                        if any(p.search(buf_line) for p in content_exclude_patterns):
+                            continue
+                        if buf_line.strip() == "":
+                            if last_line_empty:
+                                continue
+                            else:
+                                filtered_lines.append(buf_line)
+                                last_line_empty = True
+                        else:
+                            filtered_lines.append(buf_line)
+                            last_line_empty = False
+                    buffer = []
+                    started_output = True
+            else:
+                if ts is not None and to_ts and ts > to_ts:
+                    break
+                if any(p.search(line) for p in content_exclude_patterns):
+                    continue
+                if line.strip() == "":
+                    if last_line_empty:
+                        continue
+                    else:
+                        filtered_lines.append(line)
+                        last_line_empty = True
+                else:
+                    filtered_lines.append(line)
+                    last_line_empty = False
+    if not started_output and buffer:
+        for buf_line in buffer:
+            if any(p.search(buf_line) for p in content_exclude_patterns):
+                continue
+            if buf_line.strip() == "":
+                if last_line_empty:
+                    continue
+                else:
+                    filtered_lines.append(buf_line)
+                    last_line_empty = True
+            else:
+                filtered_lines.append(buf_line)
+                last_line_empty = False
+    return original_count, filtered_lines
+
+# -----------------------
 # Main Function
 # -----------------------
 def main():
@@ -366,42 +457,74 @@ def main():
     config["FROM_TIMESTAMP"] = from_ts.strftime("%Y-%m-%d %H:%M:%S") if from_ts else ""
     config["TO_TIMESTAMP"] = to_ts.strftime("%Y-%m-%d %H:%M:%S") if to_ts else ""
 
-    input_folders = config.get("input_folders", [])
-    if not input_folders:
-        print("No INPUT_FOLDERS specified in config. Exiting.")
-        sys.exit(0)
-    
-    for folder in input_folders:
+    # Build a list of files that pass file-level filtering.
+    file_list = []
+    for folder in config.get("input_folders", []):
         if not os.path.isdir(folder):
             print(f"Warning: '{folder}' is not a valid directory. Skipping.")
             continue
         for fname in os.listdir(folder):
             full_path = os.path.join(folder, fname)
-            if os.path.isfile(full_path):
-                # Print file name for file-level filtering; update same line.
-                sys.stdout.write("\rProcessing file: " + full_path + "    ")
-                sys.stdout.flush()
-                if not file_level_filter(full_path, config):
-                    # Clear line and refresh.
-                    sys.stdout.write("\r" + " " * 80 + "\r")
-                    continue
-                # File-level filtering passed; now process content.
-                sys.stdout.write("\rProcessing file: " + full_path + "    ")
-                sys.stdout.flush()
-                orig_count, filtered_lines = process_file_content(full_path, from_ts, to_ts, config)
-                # Clear line
-                sys.stdout.write("\r" + " " * 80 + "\r")
-                if len(filtered_lines) == 0:
-                    print(f"{full_path} : {orig_count} => 0 (Filtered out completely)")
-                else:
-                    out_folder = config.get("output_folder", ".")
-                    if not out_folder.endswith("\\") and not out_folder.endswith("/"):
-                        out_folder += os.sep
-                    os.makedirs(out_folder, exist_ok=True)
-                    out_file = os.path.join(out_folder, os.path.basename(full_path) + ".filtered.log")
-                    with open(out_file, 'w', encoding='utf-8') as f_out:
-                        f_out.writelines(filtered_lines)
-                    print(f"{os.path.basename(full_path)}: {orig_count} => {len(filtered_lines)}")
+            if os.path.isfile(full_path) and file_level_filter(full_path, config):
+                file_list.append(full_path)
+
+    if not file_list:
+        print("No files to process after file-level filtering. Exiting.")
+        sys.exit(0)
+
+    # Create a Manager dictionary for progress and a Queue for files.
+    manager = Manager()
+    progress_dict = manager.dict()
+    file_queue = Queue()
+    for file in file_list:
+        file_queue.put(file)
+
+    try:
+        cpu_cores = int(config.get("CPU_CORES", "4"))
+    except Exception:
+        cpu_cores = 4
+
+    # Initialize progress_dict for each core.
+    for i in range(cpu_cores):
+        progress_dict[i] = "Idle"
+
+    # Spawn worker processes.
+    workers = []
+    for i in range(cpu_cores):
+        p = Process(target=worker_process, args=(i, file_queue, progress_dict, config, from_ts, to_ts))
+        p.start()
+        workers.append(p)
+
+    # Manager loop: continuously update a fixed progress display for each core.
+    # We'll refresh the display until all workers finish.
+    while any(p.is_alive() for p in workers):
+        # Move cursor to top of progress area.
+        output_lines = []
+        for i in range(cpu_cores):
+            status = progress_dict.get(i, "Idle")
+            output_lines.append(f"Core {i}: {status}")
+        # Clear previous lines and print new progress info.
+        # Use ANSI escape sequence to move cursor up CPU_CORES lines.
+        sys.stdout.write("\033[2J")  # Clear screen
+        sys.stdout.write("\033[H")   # Move cursor to home position
+        for line in output_lines:
+            print(line)
+        time.sleep(0.5)
+
+    # One last update of progress info.
+    output_lines = []
+    for i in range(cpu_cores):
+        status = progress_dict.get(i, "Idle")
+        output_lines.append(f"Core {i}: {status}")
+    sys.stdout.write("\033[2J")
+    sys.stdout.write("\033[H")
+    for line in output_lines:
+        print(line)
+
+    # Wait for all workers to finish.
+    for p in workers:
+        p.join()
+
     end_time = time.time()
     total_time = end_time - start_time
     print(f"\nTotal time consumed: {total_time:.2f} seconds")
@@ -416,6 +539,7 @@ OUTPUT_FOLDER  = D:\temp\log
 
 FROM_TIMESTAMP = 2025-02-28 15:35:00
 TO_TIMESTAMP   = 2025-02-28 15:40:00
+CPU_CORES      = 4
 
 FILE_NAME_INCLUDE_REGEXP_PATTERN =
 JMSOutboundder.*\.log
@@ -430,6 +554,7 @@ CONTENT_EXCLUDE_REGEXP_PATTERN =
 ^.*\[KEY\].*$
 ===========================
 """
+
 
 
 
