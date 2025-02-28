@@ -4,7 +4,7 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.3.1
+Version: 1.3.2
 
 This script processes log files from multiple input folders and applies both file-level
 and content-level filtering according to configuration parameters and optional command-line
@@ -32,16 +32,16 @@ Configuration parameters (defined in the config block at the end) include:
 Usage:
   - With no command-line parameters, the script uses the config values.
   - Command-line overrides:
-       > "YYYY-MM-DD HH:MM:SS"   or   > -200    (i.e. FROM_TIMESTAMP = now - 200s)
-       < "YYYY-MM-DD HH:MM:SS"   or   < 200     (i.e. TO_TIMESTAMP = FROM_TIMESTAMP + 200s)
+       > "YYYY-MM-DD HH:MM:SS"   or   > -200   (i.e. FROM_TIMESTAMP = now - 200s)
+       < "YYYY-MM-DD HH:MM:SS"   or   < 200    (i.e. TO_TIMESTAMP = FROM_TIMESTAMP + 200s)
   - Example:
        python script.py > -200 < 10
          sets FROM_TIMESTAMP to (now - 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
 
 File-level filtering:
   1. Skip file if its last modified time is older than FROM_TIMESTAMP.
-  2. If FILE_NAME_INCLUDE_REGEXP_PATTERN is provided (non-empty), file name must match at least one pattern.
-  3. If FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), file must contain at least one matching line.
+  2. If FILE_NAME_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file name must match at least one pattern.
+  3. If FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file must contain at least one matching line.
      (If these patterns are empty, all files are included.)
 
 Content-level filtering:
@@ -49,8 +49,10 @@ Content-level filtering:
   - Stop processing lines once a line with a valid timestamp > TO_TIMESTAMP is encountered.
   - Remove lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
 
-After processing each file, the script prints the file name and the original vs. filtered line counts.
-If no content remains after filtering, no output file is created.
+After processing each file, the script prints the file name along with the original vs. filtered
+line counts. If no content remains after filtering, no output file is created.
+Additionally, while processing each file, progress (percentage of file bytes processed) is updated
+on the same line; once finished, that line is replaced with the file summary.
 Finally, the total processing time is printed.
 """
 
@@ -153,8 +155,8 @@ def parse_config():
 # -----------------------
 # Timestamp Extraction
 # -----------------------
-# Using version 1.0.3b's regex:
-timestamp_pattern = re.compile(r"^\S+\s+\S+\s+\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
+# Updated as requested: using the pattern without the initial tokens.
+timestamp_pattern = re.compile(r"\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
 
 def extract_timestamp(line):
     """
@@ -217,12 +219,13 @@ def file_level_filter(input_file, config):
 # -----------------------
 def process_file_content(input_file, from_ts, to_ts, config):
     """
-    Processes the content of one file:
+    Processes one file's content:
       - Reads all lines and counts original lines.
       - Buffers lines until a valid timestamp is found.
-      - Discards all lines before the first line with a valid timestamp >= from_ts.
+      - Discards all lines before the first line with a valid timestamp ≥ from_ts.
       - Stops processing when a line with a valid timestamp > to_ts is encountered.
       - Removes lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
+      - While processing, prints progress percentage (based on bytes processed) on the same line.
     Returns a tuple: (original_line_count, filtered_lines as list).
     """
     original_count = 0
@@ -232,10 +235,16 @@ def process_file_content(input_file, from_ts, to_ts, config):
     started_output = False
 
     content_exclude_patterns = [re.compile(p) for p in config.get("content_exclude", [])]
+    total_size = os.path.getsize(input_file)
+    processed_bytes = 0
 
     with open(input_file, 'r', encoding='utf-8') as f:
         for line in f:
             original_count += 1
+            processed_bytes += len(line.encode('utf-8'))
+            # Print progress for this file on the same line:
+            sys.stdout.write("\r    Progress: {:6.2f}%".format((processed_bytes/total_size)*100))
+            sys.stdout.flush()
             ts = extract_timestamp(line)
             if not started_output:
                 buffer.append(line)
@@ -243,7 +252,7 @@ def process_file_content(input_file, from_ts, to_ts, config):
                     if from_ts and ts < from_ts:
                         buffer = []
                         continue
-                    # Flush buffer
+                    # Flush the buffer
                     for buf_line in buffer:
                         if any(p.search(buf_line) for p in content_exclude_patterns):
                             continue
@@ -285,7 +294,8 @@ def process_file_content(input_file, from_ts, to_ts, config):
             else:
                 filtered_lines.append(buf_line)
                 last_line_empty = False
-
+    # Clear progress line and print file summary progress for this file
+    sys.stdout.write("\r" + " " * 50 + "\r")
     return original_count, filtered_lines
 
 # -----------------------
@@ -351,7 +361,6 @@ def compute_overridden_timestamps(from_override, to_override, config):
 def main():
     start_time = time.time()
     config = parse_config()
-    # Compute final FROM and TO timestamps with command-line overrides.
     from_ts, to_ts = compute_overridden_timestamps(*parse_command_line_args(), config)
     config["FROM_TIMESTAMP"] = from_ts.strftime("%Y-%m-%d %H:%M:%S") if from_ts else ""
     config["TO_TIMESTAMP"] = to_ts.strftime("%Y-%m-%d %H:%M:%S") if to_ts else ""
@@ -361,6 +370,7 @@ def main():
         print("No INPUT_FOLDERS specified in config. Exiting.")
         sys.exit(0)
     
+    # Process each file in each input folder sequentially.
     for folder in input_folders:
         if not os.path.isdir(folder):
             print(f"Warning: '{folder}' is not a valid directory. Skipping.")
@@ -370,10 +380,14 @@ def main():
             if os.path.isfile(full_path):
                 if not file_level_filter(full_path, config):
                     continue
-                print(f"\nProcessing file: {full_path}")
+                # Refresh the console line with the file name being processed.
+                sys.stdout.write("\rProcessing file: " + full_path + " " * 20)
+                sys.stdout.flush()
                 orig_count, filtered_lines = process_file_content(full_path, from_ts, to_ts, config)
+                # Clear the current line.
+                sys.stdout.write("\r" + " " * 80 + "\r")
                 if len(filtered_lines) == 0:
-                    print("  File content filtered out completely; no output file created.")
+                    print(f"{full_path} : {orig_count} => 0 (Filtered out completely)")
                 else:
                     out_folder = config.get("output_folder", ".")
                     if not out_folder.endswith("\\") and not out_folder.endswith("/"):
@@ -382,7 +396,7 @@ def main():
                     out_file = os.path.join(out_folder, os.path.basename(full_path) + ".filtered.log")
                     with open(out_file, 'w', encoding='utf-8') as f_out:
                         f_out.writelines(filtered_lines)
-                    print(f"  {os.path.basename(full_path)}: {orig_count} => {len(filtered_lines)}")
+                    print(f"{os.path.basename(full_path)}: {orig_count} => {len(filtered_lines)}")
     end_time = time.time()
     total_time = end_time - start_time
     print(f"\nTotal time consumed: {total_time:.2f} seconds")
@@ -411,6 +425,7 @@ CONTENT_EXCLUDE_REGEXP_PATTERN =
 ^.*\[KEY\].*$
 ===========================
 """
+
 
 
 
