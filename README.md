@@ -4,43 +4,43 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.4.3
+Version: 1.4.4
 
 This script processes log files from multiple input folders in parallel using a worker pool.
-It loads configuration from an external JSON file (first command-line argument, or defaults to "config.json").
+It loads configuration from an external JSON file (specified as the first command‑line argument or defaults to "config.json").
 Configuration keys (all uppercase) include:
   - INPUT_FOLDERS (array of folder paths)
   - OUTPUT_FOLDER (destination folder for filtered logs)
-  - FROM_TIMESTAMP, TO_TIMESTAMP (absolute timestamp strings or empty; can be overridden via command-line)
+  - FROM_TIMESTAMP, TO_TIMESTAMP (absolute timestamp strings or empty; may be overridden via command‑line)
   - CPU_CORES (number of worker processes)
   - FILE_NAME_INCLUDE_REGEXP_PATTERN (array of regex strings; if empty, all filenames are accepted)
   - FILE_INCLUDE_REGEXP_PATTERN (array of regex strings; if empty, all files are accepted)
   - CONTENT_EXCLUDE_REGEXP_PATTERN (array of regex strings; lines matching these are removed)
 
-File-level filtering (done in each worker):
-  - Skips a file if its last modified time is older than FROM_TIMESTAMP.
+File-level filtering (performed in each worker):
+  - Skip a file if its last modified time is older than FROM_TIMESTAMP.
   - If FILE_NAME_INCLUDE_REGEXP_PATTERN is non-empty, the file name must match at least one pattern.
-  (FILE_INCLUDE_REGEXP_PATTERN is now checked during content filtering.)
+  (FILE_INCLUDE_REGEXP_PATTERN is now applied during content filtering.)
 
 Content-level filtering (performed sequentially within each worker):
-  - Discards all lines before the first line with a valid timestamp ≥ FROM_TIMESTAMP.
-  - Stops processing when a line with a valid timestamp > TO_TIMESTAMP is encountered.
-  - Removes lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
-  - Then, if FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), at least one line in the filtered content must match; otherwise, the file is skipped.
+  - Discard all lines before the first line with a valid timestamp ≥ FROM_TIMESTAMP.
+  - Stop processing when a line with a valid timestamp > TO_TIMESTAMP is encountered.
+  - For each line (or buffered line), first apply empty-line filtering, then perform content exclusion (each line is checked exactly once).
+  - Finally, if FILE_INCLUDE_REGEXP_PATTERN is provided, at least one line in the filtered content must match; otherwise, the file is skipped.
 
-Before processing begins, OUTPUT_FOLDER is validated and then cleaned up recursively (all files and subdirectories inside are removed).
+Before processing begins, OUTPUT_FOLDER is validated and recursively cleaned.
 
-Worker processes update a shared progress dictionary, and the manager process refreshes a fixed display (one line per core) every 2 seconds.
-After processing, if filtered content remains, an output file is written to OUTPUT_FOLDER; otherwise, the file is skipped.
-Finally, the total processing time is printed.
+Worker processes get files from a shared queue and update a shared progress dictionary.
+A manager process refreshes the same fixed set of display lines (one per core) every 2 seconds.
+
+Command‑line overrides (using “>” and “<”) allow dynamic timestamp settings.
 
 Usage:
     python script.py [config.json] [> FROM_OVERRIDE] [< TO_OVERRIDE]
-For example:
+Example:
     python script.py config.json > -200 < 10
-sets FROM_TIMESTAMP to (now - 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
 
-On Windows 10, ANSI escape sequences are enabled so that the progress display updates on fixed lines.
+On Windows 10, ANSI escape sequences are enabled so that the progress display updates on the same lines.
 """
 
 import os
@@ -87,7 +87,7 @@ def load_config():
 # -----------------------
 # Validate and Clean OUTPUT_FOLDER
 # -----------------------
-def check_and_clean_output_folder(config):
+def check_output_folder(config):
     output_folder = config.get("OUTPUT_FOLDER", "").strip()
     if not output_folder:
         print("Error: OUTPUT_FOLDER is empty in config.")
@@ -110,7 +110,7 @@ def check_and_clean_output_folder(config):
         if not os.access(output_folder, os.W_OK):
             print(f"Error: OUTPUT_FOLDER '{output_folder}' is not writable.")
             sys.exit(1)
-    # Clean up the output folder: remove all files and subdirectories.
+    # Recursively remove all files and subdirectories in OUTPUT_FOLDER.
     for item in os.listdir(output_folder):
         item_path = os.path.join(output_folder, item)
         try:
@@ -220,9 +220,21 @@ def file_level_filter(input_file, config):
     return True
 
 # -----------------------
-# Content Filtering with Progress Callback for MP (including file-include check)
+# Content Filtering with Progress Callback for MP (and file-include check)
 # -----------------------
 def process_file_content_mp(input_file, from_ts, to_ts, config, progress_callback):
+    """
+    Processes one file's content as follows:
+      1. Reads lines sequentially and counts original lines.
+      2. Buffers lines until the first line with a valid timestamp ≥ from_ts is encountered.
+      3. For each line (once output has started):
+            - If a line has a valid timestamp > to_ts, stop processing further.
+            - Then, if the line is empty (with consecutive empty check), add it.
+            - Finally, perform the content_exclude check (once per line).
+      4. After processing, if FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), at least one line in the filtered output must match; otherwise, the result is empty.
+    Progress (percentage of file bytes processed) is reported via progress_callback.
+    Returns a tuple: (original_line_count, filtered_lines as list)
+    """
     original_count = 0
     filtered_lines = []
     last_line_empty = False
@@ -236,63 +248,69 @@ def process_file_content_mp(input_file, from_ts, to_ts, config, progress_callbac
         for line in f:
             original_count += 1
             processed_bytes += len(line.encode('utf-8'))
-            percentage = (processed_bytes / total_size) * 100
-            progress_callback(percentage)
+            progress_callback((processed_bytes / total_size) * 100)
             ts = extract_timestamp(line)
-            # First, filter out lines with valid timestamps outside the time range.
+            # First, if line has a valid timestamp outside [from_ts, to_ts], skip it.
             if ts is not None:
                 if (from_ts and ts < from_ts) or (to_ts and ts > to_ts):
                     continue
+            # Buffer lines until output starts.
             if not started_output:
                 buffer.append(line)
-                if ts is not None:
-                    # Flush buffer
+                if ts is not None and (from_ts is None or ts >= from_ts):
+                    # Flush the buffer.
                     for buf_line in buffer:
-                        if any(p.search(buf_line) for p in compiled_excludes):
-                            continue
+                        # First, perform empty-line filtering.
                         if buf_line.strip() == "":
                             if last_line_empty:
                                 continue
                             else:
-                                filtered_lines.append(buf_line)
+                                candidate = buf_line
                                 last_line_empty = True
                         else:
-                            filtered_lines.append(buf_line)
+                            candidate = buf_line
                             last_line_empty = False
+                        # Now perform content exclusion check once.
+                        if any(p.search(candidate) for p in compiled_excludes):
+                            continue
+                        filtered_lines.append(candidate)
                     buffer = []
                     started_output = True
             else:
                 if ts is not None and to_ts and ts > to_ts:
                     break
-                if any(p.search(line) for p in compiled_excludes):
-                    continue
+                # Process current line: first empty-line check.
                 if line.strip() == "":
                     if last_line_empty:
                         continue
                     else:
-                        filtered_lines.append(line)
+                        candidate = line
                         last_line_empty = True
                 else:
-                    filtered_lines.append(line)
+                    candidate = line
                     last_line_empty = False
+                # Now perform content exclusion check.
+                if any(p.search(candidate) for p in compiled_excludes):
+                    continue
+                filtered_lines.append(candidate)
     if not started_output and buffer:
         for buf_line in buffer:
-            if any(p.search(buf_line) for p in compiled_excludes):
-                continue
             if buf_line.strip() == "":
                 if last_line_empty:
                     continue
                 else:
-                    filtered_lines.append(buf_line)
+                    candidate = buf_line
                     last_line_empty = True
             else:
-                filtered_lines.append(buf_line)
+                candidate = buf_line
                 last_line_empty = False
-    # File-Include Check: if FILE_INCLUDE_REGEXP_PATTERN is provided, at least one line must match.
+            if any(p.search(candidate) for p in compiled_excludes):
+                continue
+            filtered_lines.append(candidate)
+    # File-Include Check: if FILE_INCLUDE_REGEXP_PATTERN is provided, ensure at least one line matches.
     fi_patterns = config.get("FILE_INCLUDE_REGEXP_PATTERN", [])
     if fi_patterns:
         if not any(any(re.search(p, line) for p in fi_patterns) for line in filtered_lines):
-            # No line in filtered_lines matches any of the patterns; skip file.
             return original_count, []
     return original_count, filtered_lines
 
@@ -305,10 +323,11 @@ def worker_process(slot_id, file_queue, progress_dict, config, from_ts, to_ts):
             file = file_queue.get_nowait()
         except Exception:
             break
-        # Perform file-level filtering in worker.
+        # Worker does its own file-level filtering.
         if not file_level_filter(file, config):
             progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)} - Skipped (File-level)"
             continue
+        # Update progress: show file name.
         progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)} - 0.00%"
         def progress_callback(p):
             progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)} - {p:.2f}%"
@@ -350,7 +369,6 @@ def main():
     if not file_list:
         print("No files found. Exiting.")
         sys.exit(0)
-    # Use worker-side file-level filtering (including file name and last modified check).
     manager = Manager()
     progress_dict = manager.dict()
     file_queue = Queue()
@@ -367,7 +385,7 @@ def main():
         p = Process(target=worker_process, args=(i, file_queue, progress_dict, config, from_ts, to_ts))
         p.start()
         workers.append(p)
-    # Manager loop: update the fixed display (one line per core) every 2 seconds.
+    # Manager loop: refresh the same fixed lines every 2 seconds.
     for _ in range(cpu_cores):
         print("")
     while any(p.is_alive() for p in workers):
@@ -390,6 +408,10 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# -----------------------
+# End of File - External JSON config is used.
+# -----------------------
 
 
 
