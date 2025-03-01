@@ -4,47 +4,46 @@ code review
 ```
 #!/usr/bin/env python3
 """
-Version: 1.4.1
+Version: 1.4.2
 
-This script processes log files from multiple input folders in parallel using a worker pool.
-It loads configuration from an external JSON file (specified as the first command-line argument or defaults to "config.json").
-The configuration keys are expected in uppercase.
+This script processes log files from multiple input folders in parallel.
+It loads its configuration from an external JSON file (passed as the first command‑line argument or defaults to "config.json").
+Configuration keys (all uppercase) include:
+  - INPUT_FOLDERS (array of folder paths)
+  - OUTPUT_FOLDER (destination folder for filtered logs)
+  - FROM_TIMESTAMP, TO_TIMESTAMP (absolute timestamp strings or empty; may be overridden via command‑line)
+  - CPU_CORES (number of worker processes)
+  - FILE_NAME_INCLUDE_REGEXP_PATTERN (array of regexes; if empty, all filenames are accepted)
+  - FILE_INCLUDE_REGEXP_PATTERN (array of regexes; if empty, all files are accepted)
+  - CONTENT_EXCLUDE_REGEXP_PATTERN (array of regexes; lines matching these are removed)
 
-Key configuration parameters include:
-  - INPUT_FOLDERS: an array of folder paths to traverse.
-  - OUTPUT_FOLDER: the destination folder for filtered logs.
-  - FROM_TIMESTAMP and TO_TIMESTAMP: as absolute timestamp strings (or empty); can be overridden via command-line.
-  - CPU_CORES: number of worker processes.
-  - FILE_NAME_INCLUDE_REGEXP_PATTERN: array of regex strings; if empty, all filenames are accepted.
-  - FILE_INCLUDE_REGEXP_PATTERN: array of regex strings; if empty, all files are accepted.
-  - CONTENT_EXCLUDE_REGEXP_PATTERN: array of regex strings; lines matching these are removed.
+File‑level filtering (performed in each worker):
+  - Skip file if its last‑modified time is older than FROM_TIMESTAMP.
+  - If FILE_NAME_INCLUDE_REGEXP_PATTERN is non‑empty, the file name must match at least one pattern.
 
-Before processing, OUTPUT_FOLDER is validated:
-  - It must be non-empty.
-  - It must be accessible and writable.
-  - It must not appear to be a file (i.e. have a file extension) unless the extension is one of: .log, .xml, .txt.
+Content‑level filtering (performed in each worker):
+  - Read the file and “filter out” lines whose valid timestamp is outside the time range.
+  - After that, if FILE_INCLUDE_REGEXP_PATTERN is provided, require that at least one line in the filtered content matches one of these patterns; if not, skip the file.
+  - Finally, remove lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
+  
+A worker process (assigned to a CPU core) repeatedly gets a file from a shared queue and processes it:
+  - It updates a shared progress dictionary with its status (file name and progress %) while processing.
+  - When finished with a file, if filtered content remains, an output file is written to OUTPUT_FOLDER.
+  
+A manager process refreshes the same fixed set of display lines (one per core) every 2 seconds.
 
-File-level filtering:
-  - Skips a file if its last modified time is older than FROM_TIMESTAMP.
-  - If FILE_NAME_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file name must match at least one pattern.
-  - If FILE_INCLUDE_REGEXP_PATTERN is provided (non-empty), the file must contain at least one matching line.
+Before processing begins, OUTPUT_FOLDER is validated:
+  - It must be non‑empty.
+  - It must be an accessible, writable directory.
+  - It must not appear to be a file (unless its extension is one of: .log, .xml, .txt).
 
-Content-level filtering (performed sequentially within each worker):
-  - Discards all lines before the first line with a valid timestamp ≥ FROM_TIMESTAMP.
-  - Stops processing when a line with a valid timestamp > TO_TIMESTAMP is encountered.
-  - Removes lines matching any CONTENT_EXCLUDE_REGEXP_PATTERN.
-
-Workers update a shared progress dictionary (one entry per CPU core) and the manager refreshes a fixed display every 2 seconds.
-After processing, if filtered content remains, an output file is written to OUTPUT_FOLDER.
-Finally, the total processing time is printed.
+Command‑line overrides (using arguments starting with “>” for FROM_TIMESTAMP and “<” for TO_TIMESTAMP) let you dynamically set these values.
+For example:
+    python script.py config.json > -200 < 10
+sets FROM_TIMESTAMP to (now – 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
 
 Usage:
     python script.py [config.json] [> FROM_OVERRIDE] [< TO_OVERRIDE]
-Example:
-    python script.py config.json > -200 < 10
-    sets FROM_TIMESTAMP to (now - 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
-
-On Windows 10, ANSI escape sequences are enabled so that the progress display updates on the same lines.
 """
 
 import os
@@ -69,12 +68,6 @@ if os.name == 'nt':
 # Load External JSON Configuration
 # -----------------------
 def load_config():
-    """
-    Loads configuration from an external JSON file.
-    The JSON filename is provided as the first command-line argument if it ends with ".json",
-    otherwise "config.json" in the current directory is used.
-    Returns a configuration dictionary with keys in uppercase.
-    """
     config_file = "config.json"
     if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".json"):
         config_file = sys.argv[1]
@@ -88,7 +81,6 @@ def load_config():
     normalized = {}
     for k, v in config.items():
         normalized[k.upper()] = v
-    # Normalize OUTPUT_FOLDER: if provided as OUTPUT_FOLDERS, use that.
     if "OUTPUT_FOLDERS" in normalized:
         normalized["OUTPUT_FOLDER"] = normalized["OUTPUT_FOLDERS"]
         del normalized["OUTPUT_FOLDERS"]
@@ -98,13 +90,6 @@ def load_config():
 # Validate OUTPUT_FOLDER
 # -----------------------
 def check_output_folder(config):
-    """
-    Validates the OUTPUT_FOLDER from config.
-    - If OUTPUT_FOLDER is empty, exits with an error.
-    - If OUTPUT_FOLDER is not accessible/writable, exits with an error.
-    - If OUTPUT_FOLDER appears to be a file (has an extension) and the extension is not one of
-      {".log", ".xml", ".txt"} (case-insensitive), exits with an error.
-    """
     output_folder = config.get("OUTPUT_FOLDER", "").strip()
     if not output_folder:
         print("Error: OUTPUT_FOLDER is empty in config.")
@@ -112,7 +97,7 @@ def check_output_folder(config):
     base, ext = os.path.splitext(output_folder)
     allowed = {".log", ".xml", ".txt"}
     if ext and ext.lower() not in allowed:
-        print(f"Error: OUTPUT_FOLDER '{output_folder}' appears to be a file with extension '{ext}' which is not allowed.")
+        print(f"Error: OUTPUT_FOLDER '{output_folder}' appears to be a file (extension '{ext}' not allowed).")
         sys.exit(1)
     if not os.path.exists(output_folder):
         try:
@@ -192,14 +177,13 @@ def compute_overridden_timestamps(from_override, to_override, config):
     return from_ts, to_ts
 
 # -----------------------
-# Timestamp Extraction
+# Timestamp Extraction (No Globals)
 # -----------------------
-# Updated regex: match a digit, a space, then 16 hex digits, a colon, a digit, a space,
-# then capture the timestamp in format "YYYY-MM-DD HH:MM:SS"
-timestamp_pattern = re.compile(r"\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
-
 def extract_timestamp(line):
-    m = timestamp_pattern.search(line)
+    # Use a function attribute to compile the regex once.
+    if not hasattr(extract_timestamp, "_pattern"):
+        extract_timestamp._pattern = re.compile(r"\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
+    m = extract_timestamp._pattern.search(line)
     if m:
         try:
             return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
@@ -208,7 +192,7 @@ def extract_timestamp(line):
     return None
 
 # -----------------------
-# File-Level Filtering
+# File-Level Filtering (Worker-side)
 # -----------------------
 def file_level_filter(input_file, config):
     mtime = os.path.getmtime(input_file)
@@ -221,27 +205,15 @@ def file_level_filter(input_file, config):
         pass
     if from_ts and file_dt < from_ts:
         return False
+    # Check only file name pattern here.
     fn_patterns = config.get("FILE_NAME_INCLUDE_REGEXP_PATTERN", [])
     if fn_patterns:
         if not any(re.search(p, os.path.basename(input_file), re.IGNORECASE) for p in fn_patterns):
             return False
-    fi_patterns = config.get("FILE_INCLUDE_REGEXP_PATTERN", [])
-    if fi_patterns:
-        found = False
-        try:
-            with open(input_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if any(re.search(p, line) for p in fi_patterns):
-                        found = True
-                        break
-        except Exception:
-            return False
-        if not found:
-            return False
     return True
 
 # -----------------------
-# Content Filtering with Progress Callback for MP
+# Content Filtering with Progress Callback for MP (and file-include check)
 # -----------------------
 def process_file_content_mp(input_file, from_ts, to_ts, config, progress_callback):
     original_count = 0
@@ -251,21 +223,25 @@ def process_file_content_mp(input_file, from_ts, to_ts, config, progress_callbac
     started_output = False
     total_size = os.path.getsize(input_file)
     processed_bytes = 0
+    # Compile content_exclude patterns locally.
     content_exclude_patterns = config.get("CONTENT_EXCLUDE_REGEXP_PATTERN", [])
     compiled_excludes = [re.compile(p) for p in content_exclude_patterns]
+    # Collect all filtered lines.
     with open(input_file, 'r', encoding='utf-8') as f:
         for line in f:
             original_count += 1
             processed_bytes += len(line.encode('utf-8'))
-            percentage = (processed_bytes / total_size) * 100
-            progress_callback(percentage)
+            progress_callback((processed_bytes / total_size) * 100)
             ts = extract_timestamp(line)
+            # 3.1 Filter out lines with valid timestamps outside [from_ts, to_ts].
+            if ts is not None:
+                if (from_ts and ts < from_ts) or (to_ts and ts > to_ts):
+                    continue
+            # Buffer lines until we see a valid timestamp (if not started yet).
             if not started_output:
                 buffer.append(line)
                 if ts is not None:
-                    if from_ts and ts < from_ts:
-                        buffer = []
-                        continue
+                    # Now flush buffer.
                     for buf_line in buffer:
                         if any(p.search(buf_line) for p in compiled_excludes):
                             continue
@@ -281,6 +257,7 @@ def process_file_content_mp(input_file, from_ts, to_ts, config, progress_callbac
                     buffer = []
                     started_output = True
             else:
+                # Already started: if a line's timestamp > to_ts, stop.
                 if ts is not None and to_ts and ts > to_ts:
                     break
                 if any(p.search(line) for p in compiled_excludes):
@@ -307,6 +284,12 @@ def process_file_content_mp(input_file, from_ts, to_ts, config, progress_callbac
             else:
                 filtered_lines.append(buf_line)
                 last_line_empty = False
+    # 3.2 File-Include Check: if FILE_INCLUDE_REGEXP_PATTERN is provided, then at least one line must match.
+    fi_patterns = config.get("FILE_INCLUDE_REGEXP_PATTERN", [])
+    if fi_patterns:
+        if not any(any(re.search(p, line) for p in fi_patterns) for line in filtered_lines):
+            # No matching line found; skip file.
+            return original_count, []
     return original_count, filtered_lines
 
 # -----------------------
@@ -318,6 +301,11 @@ def worker_process(slot_id, file_queue, progress_dict, config, from_ts, to_ts):
             file = file_queue.get_nowait()
         except Exception:
             break
+        # Do file-level filtering in worker.
+        if not file_level_filter(file, config):
+            progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)} - Skipped (File-level)"
+            continue
+        # Update progress with file name.
         progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)} - 0.00%"
         def progress_callback(p):
             progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)} - {p:.2f}%"
@@ -347,7 +335,8 @@ def main():
     from_ts, to_ts = compute_overridden_timestamps(*parse_command_line_args(), config)
     config["FROM_TIMESTAMP"] = from_ts.strftime("%Y-%m-%d %H:%M:%S") if from_ts else ""
     config["TO_TIMESTAMP"] = to_ts.strftime("%Y-%m-%d %H:%M:%S") if to_ts else ""
-    check_output_folder(config)  # Validate OUTPUT_FOLDER.
+    check_output_folder(config)
+    # Build file list from INPUT_FOLDERS (file-level filtering except file_include).
     file_list = []
     for folder in config.get("INPUT_FOLDERS", []):
         if not os.path.isdir(folder):
@@ -376,7 +365,7 @@ def main():
         p = Process(target=worker_process, args=(i, file_queue, progress_dict, config, from_ts, to_ts))
         p.start()
         workers.append(p)
-    # Manager loop: update the fixed display (one line per core) every 2 seconds.
+    # Manager loop: refresh the same fixed number of lines every 2 seconds.
     for _ in range(cpu_cores):
         print("")
     while any(p.is_alive() for p in workers):
@@ -397,32 +386,8 @@ def main():
     total_time = end_time - start_time
     print(f"\nTotal time consumed: {total_time:.2f} seconds")
 
-# -----------------------
-# Validate OUTPUT_FOLDER
-# -----------------------
-def check_output_folder(config):
-    output_folder = config.get("OUTPUT_FOLDER", "").strip()
-    if not output_folder:
-        print("Error: OUTPUT_FOLDER is empty in config.")
-        sys.exit(1)
-    base, ext = os.path.splitext(output_folder)
-    allowed = {".log", ".xml", ".txt"}
-    if ext and ext.lower() not in allowed:
-        print(f"Error: OUTPUT_FOLDER '{output_folder}' appears to be a file (extension '{ext}' not allowed).")
-        sys.exit(1)
-    if not os.path.exists(output_folder):
-        try:
-            os.makedirs(output_folder, exist_ok=True)
-        except Exception as e:
-            print(f"Error: OUTPUT_FOLDER '{output_folder}' is not accessible or writable: {e}")
-            sys.exit(1)
-    else:
-        if not os.path.isdir(output_folder):
-            print(f"Error: OUTPUT_FOLDER '{output_folder}' is not a directory.")
-            sys.exit(1)
-        if not os.access(output_folder, os.W_OK):
-            print(f"Error: OUTPUT_FOLDER '{output_folder}' is not writable.")
-            sys.exit(1)
+if __name__ == '__main__':
+    main()
 
 # -----------------------
 # Load External JSON Configuration
@@ -448,10 +413,6 @@ def load_config():
 
 if __name__ == '__main__':
     main()
-
-```
-
-
 
 
 
