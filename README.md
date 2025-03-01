@@ -2,429 +2,177 @@
 code review
 
 ```
-#!/usr/bin/env python3
-"""
-Version: 1.4.5
-
-This script processes log files from multiple input folders in parallel using a worker pool.
-Configuration is loaded from an external JSON file (the first command-line argument or defaults to "config.json").
-All configuration keys are uppercase, for example:
-
-{
-  "INPUT_FOLDERS": ["X:\\", "W:\\"],
-  "OUTPUT_FOLDER": "D:\\temp\\log",
-  "FROM_TIMESTAMP": "",
-  "TO_TIMESTAMP": "",
-  "CPU_CORES": "4",
-  "FILE_NAME_INCLUDE_REGEXP_PATTERN": [...],
-  "FILE_INCLUDE_REGEXP_PATTERN": [...],
-  "CONTENT_EXCLUDE_REGEXP_PATTERN": [...]
-}
-
-File-level filtering (in each worker):
-  - Skips a file if its last modified time is older than FROM_TIMESTAMP.
-  - If FILE_NAME_INCLUDE_REGEXP_PATTERN is non-empty, the file name must match at least one pattern.
-
-Time range + content filtering (in each worker, single pass + in-memory):
-  1. Read file line-by-line, skipping lines whose valid timestamp is outside [FROM_TIMESTAMP, TO_TIMESTAMP].
-  2. Collect in-range lines in memory.
-  3. Remove lines matching CONTENT_EXCLUDE_REGEXP_PATTERN (only once per line).
-  4. If FILE_INCLUDE_REGEXP_PATTERN is non-empty, at least one line must match; otherwise, skip.
-  5. If lines remain, write them to OUTPUT_FOLDER (as "<file>.filtered.log").
-
-Before processing, OUTPUT_FOLDER is validated and recursively cleaned.
-Workers update a shared progress dictionary (one slot per CPU core) as they read lines,
-and the manager process refreshes a fixed display every 2 seconds.
-
-Usage:
-    python script.py [config.json] [> FROM_OVERRIDE] [< TO_OVERRIDE]
-
-Example:
-    python script.py config.json > -200 < 10
-sets FROM_TIMESTAMP to (now - 200s) and TO_TIMESTAMP to (FROM_TIMESTAMP + 10s).
-
-On Windows 10, ANSI escape sequences are enabled so that the progress display updates on fixed lines.
-"""
-
 import os
-import sys
 import re
-import json
-import time
-import shutil
-from datetime import datetime, timedelta
-from multiprocessing import Process, Manager, Queue
+from datetime import datetime
 
-# Enable ANSI escape sequences on Windows 10, if possible.
-if os.name == 'nt':
-    import ctypes
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE = -11
-    mode = ctypes.c_uint32()
-    kernel32.GetConsoleMode(handle, ctypes.byref(mode))
-    mode.value |= 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    kernel32.SetConsoleMode(handle, mode.value)
+# Regular expression to extract timestamp from the start of the line.
+# Adjust the regex pattern and the datetime format as needed.
+TIMESTAMP_REGEX = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
 
-def load_config():
-    """
-    Loads configuration from an external JSON file.
-    If the first argument ends with ".json", that is used as the config file name;
-    otherwise "config.json" is used. Keys are normalized to uppercase.
-    """
-    config_file = "config.json"
-    if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".json"):
-        config_file = sys.argv[1]
-        sys.argv.pop(1)
-    try:
-        with open(config_file, 'r', encoding='utf-8') as f:
-            raw = json.load(f)
-    except Exception as e:
-        print(f"Error loading config file '{config_file}':", e)
-        sys.exit(1)
-    normalized = {}
-    for k, v in raw.items():
-        normalized[k.upper()] = v
-    if "OUTPUT_FOLDERS" in normalized:
-        normalized["OUTPUT_FOLDER"] = normalized["OUTPUT_FOLDERS"]
-        del normalized["OUTPUT_FOLDERS"]
-    return normalized
-
-def check_output_folder(config):
-    """
-    Validates OUTPUT_FOLDER from config, ensures it's non-empty,
-    is a directory, is writable, not a disallowed extension, then recursively cleans it.
-    """
-    output_folder = config.get("OUTPUT_FOLDER", "").strip()
-    if not output_folder:
-        print("Error: OUTPUT_FOLDER is empty in config.")
-        sys.exit(1)
-    base, ext = os.path.splitext(output_folder)
-    allowed = {".log", ".xml", ".txt"}
-    if ext and ext.lower() not in allowed:
-        print(f"Error: OUTPUT_FOLDER '{output_folder}' appears to be a file (extension '{ext}' not allowed).")
-        sys.exit(1)
-    if not os.path.exists(output_folder):
-        try:
-            os.makedirs(output_folder, exist_ok=True)
-        except Exception as e:
-            print(f"Error: OUTPUT_FOLDER '{output_folder}' is not accessible or writable: {e}")
-            sys.exit(1)
-    else:
-        if not os.path.isdir(output_folder):
-            print(f"Error: OUTPUT_FOLDER '{output_folder}' is not a directory.")
-            sys.exit(1)
-        if not os.access(output_folder, os.W_OK):
-            print(f"Error: OUTPUT_FOLDER '{output_folder}' is not writable.")
-            sys.exit(1)
-    # Clean it recursively
-    for item in os.listdir(output_folder):
-        item_path = os.path.join(output_folder, item)
-        try:
-            if os.path.isfile(item_path) or os.path.islink(item_path):
-                os.unlink(item_path)
-            elif os.path.isdir(item_path):
-                shutil.rmtree(item_path)
-        except Exception as e:
-            print(f"Error cleaning output folder '{output_folder}': {e}")
-            sys.exit(1)
-
-def parse_command_line_args():
-    from_override = None
-    to_override = None
-    args = sys.argv[1:]
-    for arg in args:
-        if arg.startswith('>'):
-            from_override = arg[1:].strip().strip('"').strip("'")
-        elif arg.startswith('<'):
-            to_override = arg[1:].strip().strip('"').strip("'")
-    return from_override, to_override
-
-def compute_overridden_timestamps(from_override, to_override, config):
-    """
-    Merges command-line overrides with config values for FROM_TIMESTAMP and TO_TIMESTAMP,
-    supporting relative offsets (like '-200') or absolute timestamps.
-    """
-    now = datetime.now()
-    config_from = config.get("FROM_TIMESTAMP", "").strip()
-    config_to = config.get("TO_TIMESTAMP", "").strip()
-    from_ts = None
-    to_ts = None
-
-    # Parse config_from if it's not an integer offset
-    try:
-        if config_from and not re.fullmatch(r"-?\d+", config_from):
-            from_ts = datetime.strptime(config_from, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        pass
-    # Parse config_to if it's not an integer offset
-    try:
-        if config_to and not re.fullmatch(r"-?\d+", config_to):
-            to_ts = datetime.strptime(config_to, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        pass
-
-    # Now parse command line overrides
-    if from_override is not None:
-        if re.fullmatch(r"-?\d+", from_override):
-            from_ts = now + timedelta(seconds=int(from_override))
-        else:
-            try:
-                from_ts = datetime.strptime(from_override, "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                print("Error: Invalid FROM_TIMESTAMP override format.")
-                sys.exit(1)
-    if to_override is not None:
-        if re.fullmatch(r"-?\d+", to_override):
-            if from_ts is None:
-                print("Error: Relative TO_TIMESTAMP override provided but FROM_TIMESTAMP is not set.")
-                sys.exit(1)
-            to_ts = from_ts + timedelta(seconds=int(to_override))
-        else:
-            try:
-                to_ts = datetime.strptime(to_override, "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                print("Error: Invalid TO_TIMESTAMP override format.")
-                sys.exit(1)
-
-    # If TO is still None, default to now
-    if to_ts is None:
-        to_ts = now
-    # Validate
-    if from_ts is not None and to_ts < from_ts:
-        print("Error: TO_TIMESTAMP is older than FROM_TIMESTAMP.")
-        sys.exit(1)
-
-    return from_ts, to_ts
+def parse_timestamp(ts_str):
+    """Convert a timestamp string to a datetime object."""
+    return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
 
 def extract_timestamp(line):
-    """
-    Extracts a timestamp from a line using a function attribute regex (no global).
-    """
-    if not hasattr(extract_timestamp, "_pattern"):
-        extract_timestamp._pattern = re.compile(r"\d\s+[0-9A-Fa-f]{16}:\d\s+(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})")
-    m = extract_timestamp._pattern.search(line)
-    if m:
+    """Extract and parse the timestamp from a log line (decoded string)."""
+    match = TIMESTAMP_REGEX.match(line)
+    if match:
         try:
-            return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
-        except Exception:
+            return parse_timestamp(match.group(1))
+        except ValueError:
             return None
     return None
 
-def file_level_filter(input_file, config):
+def get_line_start(file, pos):
     """
-    Worker-side file-level filtering:
-      - Skip if last modified < FROM_TIMESTAMP
-      - If FILE_NAME_INCLUDE_REGEXP_PATTERN is non-empty, file name must match at least one pattern.
+    Given a file (opened in binary mode) and an arbitrary byte offset pos,
+    find the byte offset corresponding to the start of the line that
+    contains pos. Lines are assumed to be delimited by the carriage return (b'\r').
     """
-    # Last-modified time check
-    mtime = os.path.getmtime(input_file)
-    file_dt = datetime.fromtimestamp(mtime)
-    from_ts = None
-    try:
-        if config.get("FROM_TIMESTAMP", "").strip():
-            from_ts = datetime.strptime(config["FROM_TIMESTAMP"].strip(), "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        pass
-    if from_ts and file_dt < from_ts:
-        return False
-
-    # File name check
-    fn_patterns = config.get("FILE_NAME_INCLUDE_REGEXP_PATTERN", [])
-    if fn_patterns:
-        if not any(re.search(p, os.path.basename(input_file), re.IGNORECASE) for p in fn_patterns):
-            return False
-
-    return True
-
-def process_file_content_mp(input_file, from_ts, to_ts, config, progress_callback):
-    """
-    Single-pass time range filtering:
-      - read lines once, skip lines whose timestamp < from_ts or > to_ts
-      - store in memory
-    Then in memory:
-      - remove lines matching CONTENT_EXCLUDE_REGEXP_PATTERN
-      - if FILE_INCLUDE_REGEXP_PATTERN is non-empty, ensure at least one line matches
-    Returns (original_line_count, final_filtered_lines)
-    """
-    original_count = 0
-    in_range_lines = []
-    total_size = os.path.getsize(input_file)
-    processed_bytes = 0
-
-    with open(input_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            original_count += 1
-            processed_bytes += len(line.encode('utf-8'))
-            progress_callback((processed_bytes / total_size) * 100)
-
-            # Extract timestamp
-            ts = extract_timestamp(line)
-            # If line has a valid timestamp, check if outside [from_ts, to_ts]
-            if ts is not None:
-                if (from_ts and ts < from_ts) or (to_ts and ts > to_ts):
-                    continue
-            # Keep lines in memory
-            in_range_lines.append(line)
-
-    # Now in memory we do the exclude check, empty-line check, etc.
-    # We'll remove consecutive empty lines in a single pass, then remove lines matching exclude patterns.
-    content_exclude = config.get("CONTENT_EXCLUDE_REGEXP_PATTERN", [])
-    compiled_excludes = [re.compile(p) for p in content_exclude]
-    # We'll produce final_filtered_lines
-    final_filtered_lines = []
-    last_line_empty = False
-    for line in in_range_lines:
-        if line.strip() == "":
-            if last_line_empty:
-                # skip consecutive empty
-                continue
-            else:
-                candidate = line
-                last_line_empty = True
-        else:
-            candidate = line
-            last_line_empty = False
-
-        # Now apply exclude patterns once
-        if any(p.search(candidate) for p in compiled_excludes):
-            continue
-
-        final_filtered_lines.append(candidate)
-
-    # Finally, if FILE_INCLUDE_REGEXP_PATTERN is non-empty, at least one line must match
-    fi_patterns = config.get("FILE_INCLUDE_REGEXP_PATTERN", [])
-    if fi_patterns:
-        # If none of final_filtered_lines matches any pattern, skip file
-        if not any(any(re.search(p, line) for p in fi_patterns) for line in final_filtered_lines):
-            return (original_count, [])
-
-    return (original_count, final_filtered_lines)
-
-def worker_process(slot_id, file_queue, progress_dict, config, from_ts, to_ts):
-    """
-    Worker process function:
-      - Repeatedly gets a file from file_queue
-      - file_level_filter => skip if fails
-      - time range + content filter => single pass in memory
-      - if lines remain => write output
-      - update progress_dict for manager display
-    """
-    while True:
-        try:
-            file = file_queue.get_nowait()
-        except Exception:
+    if pos == 0:
+        return 0
+    # Start at pos and move backwards until we find a b'\r'
+    cur = pos
+    while cur > 0:
+        file.seek(cur - 1)
+        byte = file.read(1)
+        if byte == b'\r':
             break
+        cur -= 1
+    return cur
 
-        # File-level filtering
-        if not file_level_filter(file, config):
-            progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)} - Skipped (File-level)"
+def get_line_info(file, pos):
+    """
+    Assuming pos is at the beginning of a line,
+    read bytes until the next b'\r' (or EOF) is encountered.
+    Returns a tuple: (line_start, line_end, line_bytes)
+    where line_bytes does not include the trailing b'\r'.
+    """
+    file.seek(pos)
+    line_bytes = bytearray()
+    while True:
+        char = file.read(1)
+        # Stop if we hit the delimiter or EOF.
+        if not char or char == b'\r':
+            break
+        line_bytes.extend(char)
+    line_end = file.tell()  # This is right after the delimiter (or EOF)
+    return pos, line_end, bytes(line_bytes)
+
+def binary_search_lower_bound(file, target_time):
+    """
+    Find the byte offset of the first log line whose timestamp is >= target_time.
+    The file must be sorted by timestamp.
+    """
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    left = 0
+    right = file_size
+    candidate = None
+
+    while left < right:
+        mid = (left + right) // 2
+        # Align mid to the beginning of a line.
+        line_start = get_line_start(file, mid)
+        # Read the full line
+        _, line_end, line_bytes = get_line_info(file, line_start)
+        try:
+            line_str = line_bytes.decode('utf-8', errors='ignore').strip()
+        except Exception:
+            # If decoding fails, skip this line.
+            left = line_end
             continue
 
-        # Show initial 0% progress
-        progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)} - 0.00%"
+        ts = extract_timestamp(line_str)
+        if ts is None:
+            # Skip lines that don't parse.
+            left = line_end
+            continue
 
-        def progress_callback(percentage):
-            progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)} - {percentage:.2f}%"
-
-        orig_count, filtered_lines = process_file_content_mp(file, from_ts, to_ts, config, progress_callback)
-
-        out_folder = config.get("OUTPUT_FOLDER", "").strip()
-        if out_folder and not out_folder.endswith(("\\", "/")):
-            out_folder += os.sep
-
-        if len(filtered_lines) > 0:
-            # Write output
-            os.makedirs(out_folder, exist_ok=True)
-            out_file = os.path.join(out_folder, os.path.basename(file) + ".filtered.log")
-            with open(out_file, 'w', encoding='utf-8') as f_out:
-                f_out.writelines(filtered_lines)
-            progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)}: {orig_count} => {len(filtered_lines)}"
+        if ts >= target_time:
+            # Candidate found; try to search left for an earlier matching line.
+            candidate = line_start
+            right = line_start
         else:
-            progress_dict[slot_id] = f"Core {slot_id}: {os.path.basename(file)}: {orig_count} => 0 (Filtered out)"
+            # Move to the next line.
+            left = line_end
 
-        time.sleep(0.2)
+    # If no candidate was found, candidate remains None. In that case, return the file_size.
+    return candidate if candidate is not None else file_size
 
-def main():
-    start_time = time.time()
+def binary_search_upper_bound(file, target_time):
+    """
+    Find the byte offset of the start of the last log line whose timestamp is <= target_time.
+    The file must be sorted by timestamp.
+    """
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    left = 0
+    right = file_size
+    candidate = None
 
-    # Load config from JSON
-    config = load_config()
-
-    # Merge command-line overrides for FROM_TIMESTAMP, TO_TIMESTAMP
-    from_ts, to_ts = compute_overridden_timestamps(None, None, config)
-    config["FROM_TIMESTAMP"] = from_ts.strftime("%Y-%m-%d %H:%M:%S") if from_ts else ""
-    config["TO_TIMESTAMP"] = to_ts.strftime("%Y-%m-%d %H:%M:%S") if to_ts else ""
-
-    # Validate & clean output folder
-    check_output_folder(config)
-
-    # Build file list from config["INPUT_FOLDERS"]
-    file_list = []
-    input_folders = config.get("INPUT_FOLDERS", [])
-    for folder in input_folders:
-        if not os.path.isdir(folder):
-            print(f"Warning: '{folder}' is not a valid directory. Skipping.")
+    while left < right:
+        mid = (left + right) // 2
+        # Align mid to the beginning of a line.
+        line_start = get_line_start(file, mid)
+        _, line_end, line_bytes = get_line_info(file, line_start)
+        try:
+            line_str = line_bytes.decode('utf-8', errors='ignore').strip()
+        except Exception:
+            right = line_start
             continue
-        for fname in os.listdir(folder):
-            full_path = os.path.join(folder, fname)
-            if os.path.isfile(full_path):
-                file_list.append(full_path)
 
-    if not file_list:
-        print("No files found. Exiting.")
-        sys.exit(0)
+        ts = extract_timestamp(line_str)
+        if ts is None:
+            right = line_start
+            continue
 
-    # Start manager, progress dict, queue
-    manager = Manager()
-    progress_dict = manager.dict()
-    file_queue = Queue()
-    for file in file_list:
-        file_queue.put(file)
+        if ts <= target_time:
+            # Candidate line qualifies; record it and search right.
+            candidate = line_start
+            left = line_end
+        else:
+            right = line_start
 
-    # CPU cores
-    try:
-        cpu_cores = int(config.get("CPU_CORES", "4"))
-    except Exception:
-        cpu_cores = 4
+    # If no candidate was found, candidate remains None. In that case, return 0.
+    return candidate if candidate is not None else 0
 
-    # Initialize progress
-    for i in range(cpu_cores):
-        progress_dict[i] = f"Core {i}: Idle"
+def extract_log_range(input_file, output_file, from_timestamp, to_timestamp):
+    """
+    Extract all log lines (as bytes) between from_timestamp and to_timestamp (inclusive)
+    using binary search to find the boundaries. The result is written to output_file.
+    """
+    with open(input_file, 'rb') as f:
+        # Find the lower and upper boundaries by binary search.
+        lower_bound = binary_search_lower_bound(f, from_timestamp)
+        upper_bound = binary_search_upper_bound(f, to_timestamp)
 
-    # Spawn workers
-    workers = []
-    for i in range(cpu_cores):
-        p = Process(target=worker_process, args=(i, file_queue, progress_dict, config, from_ts, to_ts))
-        p.start()
-        workers.append(p)
+        if lower_bound is None or lower_bound >= f.tell():
+            print("No log lines found for the given start time.")
+            return
 
-    # Manager loop: refresh the same fixed lines (cpu_cores) every 2s
-    for _ in range(cpu_cores):
-        print("")
-    while any(p.is_alive() for p in workers):
-        sys.stdout.write(f"\033[{cpu_cores}A")  # Move cursor up
-        for i in range(cpu_cores):
-            status = progress_dict.get(i, f"Core {i}: Idle")
-            sys.stdout.write("\033[K" + status + "\n")
-        sys.stdout.flush()
-        time.sleep(2)
+        # Get the full last line (to include its entire content).
+        f.seek(upper_bound)
+        _, upper_line_end, _ = get_line_info(f, upper_bound)
 
-    # Final refresh
-    sys.stdout.write(f"\033[{cpu_cores}A")
-    for i in range(cpu_cores):
-        status = progress_dict.get(i, f"Core {i}: Idle")
-        sys.stdout.write("\033[K" + status + "\n")
-    sys.stdout.flush()
+        # Read all bytes between the lower_bound and the end of the last qualifying line.
+        f.seek(lower_bound)
+        bytes_to_read = upper_line_end - lower_bound
+        data = f.read(bytes_to_read)
 
-    # Join workers
-    for p in workers:
-        p.join()
+    with open(output_file, 'wb') as out:
+        out.write(data)
+    print(f"Extracted log range written to: {output_file}")
 
-    end_time = time.time()
-    print(f"\nTotal time consumed: {end_time - start_time:.2f} seconds")
-
+# Example usage:
 if __name__ == '__main__':
-    main()
+    # Set your time range here.
+    from_timestamp = datetime.strptime("2025-03-01 12:00:00", "%Y-%m-%d %H:%M:%S")
+    to_timestamp   = datetime.strptime("2025-03-01 13:00:00", "%Y-%m-%d %H:%M:%S")
+    input_file = "large_log.txt"
+    output_file = "filtered_log.txt"
+    extract_log_range(input_file, output_file, from_timestamp, to_timestamp)
 
 
 
