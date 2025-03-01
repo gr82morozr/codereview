@@ -6,16 +6,16 @@ import os
 import re
 from datetime import datetime
 
-# Regular expression to extract timestamp from the start of the line.
-# Adjust the regex pattern and the datetime format as needed.
+# Regular expression to extract a timestamp from the beginning of a line.
+# Adjust the regex pattern and datetime format if needed.
 TIMESTAMP_REGEX = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
 
 def parse_timestamp(ts_str):
-    """Convert a timestamp string to a datetime object."""
+    """Convert a timestamp string into a datetime object."""
     return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
 
 def extract_timestamp(line):
-    """Extract and parse the timestamp from a log line (decoded string)."""
+    """Extract and parse the timestamp from a log line (string)."""
     match = TIMESTAMP_REGEX.match(line)
     if match:
         try:
@@ -26,44 +26,46 @@ def extract_timestamp(line):
 
 def get_line_start(file, pos):
     """
-    Given a file (opened in binary mode) and an arbitrary byte offset pos,
-    find the byte offset corresponding to the start of the line that
-    contains pos. Lines are assumed to be delimited by the carriage return (b'\r').
+    Given a file (opened in binary mode) and an arbitrary byte offset 'pos',
+    scan backwards to find the start of the line. For Windows logs, lines end
+    with b'\r\n'. This function returns the byte offset immediately after the
+    previous b'\r\n' (i.e. the start of the current line), or 0 if none is found.
     """
     if pos == 0:
         return 0
-    # Start at pos and move backwards until we find a b'\r'
     cur = pos
-    while cur > 0:
-        file.seek(cur - 1)
-        byte = file.read(1)
-        if byte == b'\r':
-            break
+    # We need at least two bytes to check for the CRLF sequence.
+    while cur > 1:
+        file.seek(cur - 2)
+        chunk = file.read(2)
+        if chunk == b'\r\n':
+            return cur
         cur -= 1
-    return cur
+    return 0
 
 def get_line_info(file, pos):
     """
-    Assuming pos is at the beginning of a line,
-    read bytes until the next b'\r' (or EOF) is encountered.
-    Returns a tuple: (line_start, line_end, line_bytes)
-    where line_bytes does not include the trailing b'\r'.
+    Assuming 'pos' is at the start of a line, read until the next CRLF (b'\r\n')
+    is encountered. Returns a tuple:
+        (line_start, line_end, line_content)
+    where line_content is the line's bytes without the trailing newline.
     """
     file.seek(pos)
-    line_bytes = bytearray()
-    while True:
-        char = file.read(1)
-        # Stop if we hit the delimiter or EOF.
-        if not char or char == b'\r':
-            break
-        line_bytes.extend(char)
-    line_end = file.tell()  # This is right after the delimiter (or EOF)
-    return pos, line_end, bytes(line_bytes)
+    line_bytes = file.readline()  # Reads until b'\n'
+    line_end = file.tell()
+    # Remove the Windows CRLF (b'\r\n') if present; if not, remove a lone LF (b'\n')
+    if line_bytes.endswith(b'\r\n'):
+        line_content = line_bytes[:-2]
+    elif line_bytes.endswith(b'\n'):
+        line_content = line_bytes[:-1]
+    else:
+        line_content = line_bytes
+    return pos, line_end, line_content
 
 def binary_search_lower_bound(file, target_time):
     """
     Find the byte offset of the first log line whose timestamp is >= target_time.
-    The file must be sorted by timestamp.
+    Assumes the file is sorted by timestamp.
     """
     file.seek(0, os.SEEK_END)
     file_size = file.tell()
@@ -73,38 +75,31 @@ def binary_search_lower_bound(file, target_time):
 
     while left < right:
         mid = (left + right) // 2
-        # Align mid to the beginning of a line.
+        # Align mid to the start of a line.
         line_start = get_line_start(file, mid)
-        # Read the full line
         _, line_end, line_bytes = get_line_info(file, line_start)
         try:
             line_str = line_bytes.decode('utf-8', errors='ignore').strip()
         except Exception:
-            # If decoding fails, skip this line.
             left = line_end
             continue
 
         ts = extract_timestamp(line_str)
         if ts is None:
-            # Skip lines that don't parse.
             left = line_end
             continue
 
         if ts >= target_time:
-            # Candidate found; try to search left for an earlier matching line.
             candidate = line_start
-            right = line_start
+            right = line_start  # Search left for an earlier qualifying line.
         else:
-            # Move to the next line.
-            left = line_end
-
-    # If no candidate was found, candidate remains None. In that case, return the file_size.
+            left = line_end  # Move right.
     return candidate if candidate is not None else file_size
 
 def binary_search_upper_bound(file, target_time):
     """
-    Find the byte offset of the start of the last log line whose timestamp is <= target_time.
-    The file must be sorted by timestamp.
+    Find the byte offset at the start of the last log line whose timestamp is <= target_time.
+    Assumes the file is sorted by timestamp.
     """
     file.seek(0, os.SEEK_END)
     file_size = file.tell()
@@ -114,7 +109,6 @@ def binary_search_upper_bound(file, target_time):
 
     while left < right:
         mid = (left + right) // 2
-        # Align mid to the beginning of a line.
         line_start = get_line_start(file, mid)
         _, line_end, line_bytes = get_line_info(file, line_start)
         try:
@@ -129,34 +123,33 @@ def binary_search_upper_bound(file, target_time):
             continue
 
         if ts <= target_time:
-            # Candidate line qualifies; record it and search right.
             candidate = line_start
-            left = line_end
+            left = line_end  # Search right for a later qualifying line.
         else:
-            right = line_start
-
-    # If no candidate was found, candidate remains None. In that case, return 0.
+            right = line_start  # Move left.
     return candidate if candidate is not None else 0
 
 def extract_log_range(input_file, output_file, from_timestamp, to_timestamp):
     """
-    Extract all log lines (as bytes) between from_timestamp and to_timestamp (inclusive)
-    using binary search to find the boundaries. The result is written to output_file.
+    Extracts log lines between 'from_timestamp' and 'to_timestamp' (inclusive) by using
+    binary search to identify the lower and upper boundaries. The extracted bytes
+    are written to the output file.
     """
     with open(input_file, 'rb') as f:
-        # Find the lower and upper boundaries by binary search.
+        # Find lower and upper boundaries by binary search.
         lower_bound = binary_search_lower_bound(f, from_timestamp)
         upper_bound = binary_search_upper_bound(f, to_timestamp)
 
+        # If no valid lower bound is found, report and exit.
         if lower_bound is None or lower_bound >= f.tell():
             print("No log lines found for the given start time.")
             return
 
-        # Get the full last line (to include its entire content).
+        # Ensure we include the complete last line by reading its full length.
         f.seek(upper_bound)
         _, upper_line_end, _ = get_line_info(f, upper_bound)
 
-        # Read all bytes between the lower_bound and the end of the last qualifying line.
+        # Read all bytes from the lower bound to the end of the last qualifying line.
         f.seek(lower_bound)
         bytes_to_read = upper_line_end - lower_bound
         data = f.read(bytes_to_read)
@@ -167,12 +160,12 @@ def extract_log_range(input_file, output_file, from_timestamp, to_timestamp):
 
 # Example usage:
 if __name__ == '__main__':
-    # Set your time range here.
     from_timestamp = datetime.strptime("2025-03-01 12:00:00", "%Y-%m-%d %H:%M:%S")
     to_timestamp   = datetime.strptime("2025-03-01 13:00:00", "%Y-%m-%d %H:%M:%S")
     input_file = "large_log.txt"
     output_file = "filtered_log.txt"
     extract_log_range(input_file, output_file, from_timestamp, to_timestamp)
+
 
 
 
