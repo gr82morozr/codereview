@@ -2,101 +2,120 @@
 code review
 
 ```
-def get_line_ts(file, pos, file_size, direction):
+import re
+import json
+
+def parse_log(log_text_array):
     """
-    Searches from a given byte offset (pos) in a file (opened in binary mode)
-    for the first complete line that contains a valid timestamp (based on a
-    regular expression). Uses Windows CRLF (b'\\r\\n') as the line delimiter.
-
-    :param file:      File handle (binary mode).
-    :param pos:       Starting byte offset in the file.
-    :param file_size: Total bytes in the file (e.g., via f.seek(0,2); f.tell()).
-    :param direction: "LEFT" or "RIGHT", indicating the search direction.
-
-    :return: (line_start, line_end, line_str, ts) if a valid timestamped line is found, else None
-       - line_start: The byte offset where this line begins
-       - line_end:   The byte offset right after the line's CRLF delimiter
-       - line_str:   The decoded line content (stripped of trailing CRLF)
-       - ts:         The extracted timestamp string from the line
+    Parses a log (list of log lines) to build a nested JSON structure for workflow executions.
+    
+    Each workflow may contain steps and nested workflows. The log lines are expected to include:
+      - "Instantiating process defination '<workflow_name>'"
+      - "Instantiating step defination '<step_name>'"
+      - "Stopping step instance of '<step_name>'"
+      - "Stopping process instance of '<workflow_name>'"
+    
+    A timestamp is assumed to be enclosed in <...> in each log line.
+    
+    Parameters:
+        log_text_array (list of str): The log file content, one line per array element.
+    
+    Returns:
+        dict: A JSON-ready dictionary with key "workflowExecutions" holding the top-level workflows.
     """
-    import re
+    # Compile regex patterns for timestamp and different log events.
+    timestamp_pattern = re.compile(r'<([^>]+)>')
+    process_start_pattern = re.compile(r"Instantiating process defination\s+'([^']+)'")
+    step_start_pattern = re.compile(r"Instantiating step defination\s+'([^']+)'")
+    step_stop_pattern = re.compile(r"Stopping step instance of\s+'([^']+)'")
+    process_stop_pattern = re.compile(r"Stopping process instance of\s+'([^']+)'")
+    
+    stack = []   # Will keep active workflows
+    result = []  # Top-level workflows
 
-    # Regex for a timestamp at the start of the line: YYYY-MM-DD HH:MM:SS
-    TIMESTAMP_REGEX = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
+    for line in log_text_array:
+        # Extract the timestamp (first occurrence of a string enclosed in <...>)
+        timestamp_match = timestamp_pattern.search(line)
+        timestamp = timestamp_match.group(1) if timestamp_match else None
 
-    direction = direction.upper()
-    current_pos = pos
+        # Check for starting a new workflow
+        proc_start = process_start_pattern.search(line)
+        if proc_start:
+            workflow_name = proc_start.group(1).strip()
+            workflow = {
+                "workflowName": workflow_name,
+                "startTimestamp": timestamp,
+                "endTimestamp": None,
+                "steps": [],
+                "nestedWorkflows": []
+            }
+            stack.append(workflow)
+            continue
 
-    while True:
-        # ---------------------------
-        # 1) Check bounds by direction
-        # ---------------------------
-        if direction == "RIGHT":
-            if current_pos >= file_size:
-                break
-        elif direction == "LEFT":
-            if current_pos <= 0:
-                break
-        else:
-            raise ValueError("Invalid direction. Use 'LEFT' or 'RIGHT'.")
+        # Check for starting a new step within the current workflow
+        step_start = step_start_pattern.search(line)
+        if step_start:
+            step_name = step_start.group(1).strip()
+            step = {
+                "stepName": step_name,
+                "startTimestamp": timestamp,
+                "endTimestamp": None
+            }
+            if stack:
+                stack[-1]["steps"].append(step)
+            continue
 
-        # -----------------------------------------------------
-        # 2) Find the start of the line by scanning backward
-        #    until we see CRLF (b'\r\n') or reach file start.
-        # -----------------------------------------------------
-        line_start = current_pos
-        if line_start > 1:
-            while line_start > 1:
-                file.seek(line_start - 2)
-                if file.read(2) == b'\r\n':
-                    # Found the CRLF for the previous line, so our line starts here
-                    break
-                line_start -= 1
-        else:
-            # If near the start of the file, just set to 0
-            line_start = 0
+        # Check for stopping a step
+        step_stop = step_stop_pattern.search(line)
+        if step_stop:
+            step_name = step_stop.group(1).strip()
+            if stack:
+                # Find the last step with matching name that hasn't been stopped yet.
+                for step in reversed(stack[-1]["steps"]):
+                    if step["stepName"] == step_name and step["endTimestamp"] is None:
+                        step["endTimestamp"] = timestamp
+                        break
+            continue
 
-        # -----------------------
-        # 3) Read the complete line
-        # -----------------------
-        file.seek(line_start)
-        line_bytes = file.readline()  # Reads until b'\n'
-        line_end = file.tell()
+        # Check for stopping a workflow (process)
+        proc_stop = process_stop_pattern.search(line)
+        if proc_stop:
+            workflow_name = proc_stop.group(1).strip()
+            if stack:
+                # Assume the last workflow on the stack is the one ending.
+                current_workflow = stack.pop()
+                current_workflow["endTimestamp"] = timestamp
+                # If there is a parent workflow, nest this workflow; otherwise, it's a top-level workflow.
+                if stack:
+                    stack[-1]["nestedWorkflows"].append(current_workflow)
+                else:
+                    result.append(current_workflow)
+            continue
 
-        # -------------------------
-        # 4) Strip trailing CRLF (or LF)
-        # -------------------------
-        if line_bytes.endswith(b'\r\n'):
-            trimmed_line_bytes = line_bytes[:-2]
-        elif line_bytes.endswith(b'\n'):
-            trimmed_line_bytes = line_bytes[:-1]
-        else:
-            trimmed_line_bytes = line_bytes
+    # If there are any workflows left in the stack (due to incomplete logs), add them as top-level.
+    while stack:
+        workflow = stack.pop()
+        result.append(workflow)
 
-        # 5) Decode to string (ignore errors)
-        try:
-            line_str = trimmed_line_bytes.decode('utf-8', errors='ignore').strip()
-        except:
-            line_str = ""
+    return {"workflowExecutions": result}
 
-        # 6) Check for timestamp at start of line
-        match = TIMESTAMP_REGEX.match(line_str)
-        if match:
-            ts = match.group(1)
-            return (line_start, line_end, line_str, ts)
-
-        # -------------------------------------
-        # 7) Move to the next iteration
-        # -------------------------------------
-        if direction == "RIGHT":
-            # Jump forward: next search position is right after this line
-            current_pos = line_end
-        else:  # direction == "LEFT"
-            # Jump backward: next search position is just before this line
-            current_pos = line_start - 1
-
-    # If we exit the loop, no valid timestamped line was found in that direction
-    return None
+# Example usage:
+if __name__ == "__main__":
+    log_text_array = [
+        "... <2025-03-03T10:00:00Z> ... Instantiating process defination 'workflowA'",
+        "... <2025-03-03T10:00:10Z> ... Instantiating step defination 'stepA1_name'",
+        "... <2025-03-03T10:00:20Z> ... Stopping step instance of 'stepA1_name'",
+        "... <2025-03-03T10:00:30Z> ... Instantiating step defination 'stepA2_name'",
+        "... <2025-03-03T10:00:40Z> ... Stopping step instance of 'stepA2_name'",
+        "... <2025-03-03T10:01:00Z> ... Instantiating process defination 'workflowB'",
+        "... <2025-03-03T10:01:10Z> ... Instantiating step defination 'stepB1_name'",
+        "... <2025-03-03T10:01:20Z> ... Stopping step instance of 'stepB1_name'",
+        "... <2025-03-03T10:01:30Z> ... Stopping process instance of 'workflowB'",
+        "... <2025-03-03T10:02:00Z> ... Stopping process instance of 'workflowA'"
+    ]
+    
+    output_json = parse_log(log_text_array)
+    print(json.dumps(output_json, indent=2))
 
 
 
