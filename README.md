@@ -1,3 +1,4 @@
+"""
 function FindLastActiveEmployment(InputPS, OutputPS) {
     var workerId = InputPS.GetProperty("Worker Id"); // Get input Worker Id
     var bo = TheApplication().GetBusObject("NQSC Worker");
@@ -32,3 +33,4 @@ function FindLastActiveEmployment(InputPS, OutputPS) {
     bc = null;
     bo = null;
 }
+"""
