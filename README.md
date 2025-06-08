@@ -1,8 +1,22 @@
+"""
+POST _reindex
 {
-  "size": 0,
-  "aggs": {
-    "min_ts": { "min": { "field": "load_timestamp" } },
-    "max_ts": { "max": { "field": "load_timestamp" } },
-    "total_docs": { "value_count": { "field": "load_timestamp" } }
+  "source": {
+    "index": "indexA"
+  },
+  "dest": {
+    "index": "indexB"
+  },
+  "script": {
+    "lang": "painless",
+    "source": """
+      Map newDoc = new HashMap();
+      newDoc['field1'] = ctx._source['field1'];
+      newDoc['field2'] = ctx._source['field2'];
+      newDoc['field3'] = ctx._source['field3'];
+      ctx._source = newDoc;
+    """
   }
 }
+
+"""
