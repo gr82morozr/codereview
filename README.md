@@ -1,24 +1,15 @@
 """
-$listener = [System.Net.HttpListener]::new()
-$listener.Prefixes.Add("http://localhost:8080/")
-$listener.Start()
-Write-Host "Serving HTTP on http://localhost:8080/"
-while ($listener.IsListening) {
-    $context = $listener.GetContext()
-    $path = $context.Request.Url.AbsolutePath.TrimStart("/")
-    if ([string]::IsNullOrWhiteSpace($path)) { $path = "index.html" }
-    $file = Join-Path $PWD $path
-    if (Test-Path $file) {
-        $bytes = [System.IO.File]::ReadAllBytes($file)
-        $context.Response.ContentType = "text/html"
-        $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
-    } else {
-        $context.Response.StatusCode = 404
-        $msg = [System.Text.Encoding]::UTF8.GetBytes("Not found")
-        $context.Response.OutputStream.Write($msg, 0, $msg.Length)
-    }
-    $context.Response.OutputStream.Close()
-}
+
+Thanks again for the helpful suggestions — really appreciate your input.
+
+This index is purely for staging, holding raw data from Siebel as the source of truth for downstream processing. All fields are mapped as text to keep things flexible and tolerant of varying data types, since it's just for storage.
+
+A separate, search-optimized index will be created from this. In that one, fields like IDs will be mapped as keyword, and dates will use proper date types as you recommended.
+
+Since the data isn’t time-series, we haven’t applied ILM or data streams. I did include a load_timestamp field though, mainly to support delta reindexing and to help track sync latency for the real-time interface.
+
+Thanks again for your review!
+
 
 
 """
