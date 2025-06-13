@@ -2,22 +2,22 @@
 
 
 
+  def nestedDateFields = [
+        ['FaCS NQSC Worker Qualification', 'Updated'],
+        ['FaCS NQSC Worker Qualification', 'Created'],
+        ['FaCS NQSC Worker Qualification', 'Date Completed'],
+        ['FaCS NQSC Worker Identification', 'Created'],
+        ['FaCS NQSC Worker Identification', 'Updated']
+        // Add more as needed
+      ];
 
-      for (String f : dateFields) {
-        def parts = f.splitOnToken('\\.');
-        def obj = ctx;
-        for (int i = 0; i < parts.length - 1; i++) {
-          if (obj.containsKey(parts[i])) {
-            obj = obj[parts[i]];
-          } else {
-            obj = null;
-            break;
-          }
-        }
-        if (obj != null) {
-          def lastKey = parts[parts.length - 1];
-          if (!obj.containsKey(lastKey) || obj[lastKey] == null || obj[lastKey] == '') {
-            obj.remove(lastKey);
+      for (def pair : nestedDateFields) {
+        def parent = pair[0];
+        def child = pair[1];
+        if (ctx.containsKey(parent)) {
+          def sub = ctx[parent];
+          if (sub instanceof Map && (!sub.containsKey(child) || sub[child] == null || sub[child] == '')) {
+            sub.remove(child);
           }
         }
       }
