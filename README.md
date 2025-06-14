@@ -4,41 +4,48 @@
 
 
 
-PUT _ingest/pipeline/validate_nested_fields
-{
-  "processors": [
-    {
-      "script": {
-        "description": "Loop through predefined repeated fields and clean subfields with invalid values",
-        "lang": "painless",
-        "source": """
-          def targetFields = [
-            ['path': 'qualifications', 'fields': ['year', 'level', 'status']],
-            ['path': 'experiences',     'fields': ['from', 'to', 'position']]
+
+          def validations = [
+            ['path': '/',              'subfields': ['source_system', 'load_timestamp', 'user_status']],
+            ['path': 'qualifications', 'subfields': ['year', 'level', 'status']],
+            ['path': 'experiences',    'subfields': ['from', 'to', 'position']]
           ];
-          
-          for (def config : targetFields) {
-            def path = config.path;
-            def fields = config.fields;
-            if (ctx.containsKey(path) && ctx.get(path) instanceof List) {
-              for (def item : ctx.get(path)) {
-                for (def field : fields) {
-                  if (item.containsKey(field)) {
-                    def val = item.get(field);
-                    // Example validation: remove if null or empty string
-                    if (val == null || (val instanceof String && val.trim().length() == 0)) {
-                      item.remove(field);
-                    }
-                  }
+
+          def cleanField = (Map target, List fields) -> {
+            for (def field : fields) {
+              if (target.containsKey(field)) {
+                def val = target.get(field);
+                if (val == null || (val instanceof String && val.trim().length() == 0)) {
+                  target.remove(field);
                 }
               }
             }
+          };
+
+          for (def config : validations) {
+            def path = config.path;
+            def subfields = config.subfields;
+
+            if (path == '/') {
+              cleanField(ctx, subfields);
+              continue;
+            }
+
+            if (!ctx.containsKey(path)) continue;
+            def value = ctx.get(path);
+            def items = value instanceof List ? value : [value];
+
+            for (def item : items) {
+              if (item instanceof Map) {
+                cleanField(item, subfields);
+              }
+            }
+
+            if (!(value instanceof List)) {
+              ctx.put(path, items[0]);
+            }
           }
-        """
-      }
-    }
-  ]
-}
+     
 
 
 
