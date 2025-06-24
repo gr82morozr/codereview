@@ -1,54 +1,14 @@
+# Set your Elasticsearch endpoint
+$esUrl = "http://localhost:9200/my-index/_search"
 
-"""
+# Set your JSON query (single-line)
+$jsonQuery = '{"query":{"match_all":{}}}'
 
+# Run the curl command and save the response to result.json
+curl -X POST $esUrl `
+     -H "Content-Type: application/json" `
+     -d $jsonQuery `
+     -o result.json
 
-
-
-
-          def validations = [
-            ['path': '/',              'subfields': ['source_system', 'load_timestamp', 'user_status']],
-            ['path': 'qualifications', 'subfields': ['year', 'level', 'status']],
-            ['path': 'experiences',    'subfields': ['from', 'to', 'position']]
-          ];
-
-          def cleanField = (Map target, List fields) -> {
-            for (def field : fields) {
-              if (target.containsKey(field)) {
-                def val = target.get(field);
-                if (val == null || (val instanceof String && val.trim().length() == 0)) {
-                  target.remove(field);
-                }
-              }
-            }
-          };
-
-          for (def config : validations) {
-            def path = config.path;
-            def subfields = config.subfields;
-
-            if (path == '/') {
-              cleanField(ctx, subfields);
-              continue;
-            }
-
-            if (!ctx.containsKey(path)) continue;
-            def value = ctx.get(path);
-            def items = value instanceof List ? value : [value];
-
-            for (def item : items) {
-              if (item instanceof Map) {
-                cleanField(item, subfields);
-              }
-            }
-
-            if (!(value instanceof List)) {
-              ctx.put(path, items[0]);
-            }
-          }
-     
-
-
-
-
-
-"""
+# Notify the user
+Write-Host "Query sent to Elasticsearch. Output saved to result.json"
