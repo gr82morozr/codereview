@@ -1,14 +1,20 @@
-# Set your Elasticsearch endpoint
-$esUrl = "http://localhost:9200/my-index/_search"
+"""
 
-# Set your JSON query (single-line)
-$jsonQuery = '{"query":{"match_all":{}}}'
 
-# Run the curl command and save the response to result.json
-curl -X POST $esUrl `
-     -H "Content-Type: application/json" `
-     -d $jsonQuery `
-     -o result.json
 
-# Notify the user
-Write-Host "Query sent to Elasticsearch. Output saved to result.json"
+
+pattern = re.compile(r"result\.(\d{3})\.json")
+
+# List matching files
+files = [f for f in os.listdir('.') if pattern.match(f)]
+
+if not files:
+    next_filename = "result.001.json"
+else:
+    # Extract numeric parts and find max
+    max_n = max(int(pattern.match(f).group(1)) for f in files)
+    next_filename = f"result.{max_n + 1:03d}.json"
+
+
+
+"""
