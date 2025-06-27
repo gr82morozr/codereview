@@ -1,66 +1,42 @@
 """
 
 
-import re
-import json
-import subprocess
+import time
+import sys
 
-# --- CONFIG ---
-raw_path = "pipeline_raw.txt"     # input: raw (Kibana-style) pipeline
-clean_path = "pipeline_clean.json"  # output: valid JSON
-es_url = "http://localhost:9200/_ingest/pipeline/my-pipeline-id"
+def replace_text_in_file(file_path, target, replacement):
+    retry_count = 0
+    func_name = 'replace_text_in_file'
 
-# --- STEP 1: Read raw text (not necessarily valid JSON) ---
-with open(raw_path, "r", encoding="utf-8") as f:
-    raw_text = f.read()
+    while True:
+        try:
+            # Read original content
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
 
-# --- STEP 2: Replace multiline script source blocks: source: """ ... """ → escaped string ---
-def escape_script_block(match):
-    script_content = match.group(1)
-    escaped = (
-        script_content
-        .replace("\\", "\\\\")  # escape backslashes first
-        .replace("\"", "\\\"")  # escape quotes
-        .replace("\r", "")      # normalize line endings
-        .replace("\n", "\\n")   # escape newlines
-    )
-    return f'"source": "{escaped}"'
+            # Replace the text
+            content = content.replace(target, replacement)
 
-# Find: source: """(multiline content)""" (Kibana-style triple-quoted script)
-fixed_text = re.sub(
-    r'source\s*:\s*"""\s*(.*?)\s*"""',
-    escape_script_block,
-    raw_text,
-    flags=re.DOTALL
-)
+            # Write updated content back
+            with open(file_path, 'w', encoding='utf-8') as file:
+                file.write(content)
 
-# --- STEP 3: Try parsing as strict JSON ---
-try:
-    data = json.loads(fixed_text)
-except json.JSONDecodeError as e:
-    print(f"❌ JSON parsing failed after cleaning: {e}")
-    print(f"👉 Suggest checking line {e.lineno}: {e.msg}")
-    exit(1)
+            # Success
+            print(f"\n{func_name} - completed")
+            break
 
-# --- STEP 4: Save as valid JSON ---
-with open(clean_path, "w", encoding="utf-8", newline="\n") as f:
-    json.dump(data, f, indent=2)
-print(f"✅ Clean JSON saved to: {clean_path}")
+        except PermissionError:
+            retry_count += 1
+            sys.stdout.write(f"\r{func_name} - retry - {retry_count}")
+            sys.stdout.flush()
+            time.sleep(0.5)  # short delay before retrying
 
-# --- STEP 5: Send to Elasticsearch using curl ---
-curl_cmd = [
-    "curl", "-X", "PUT", es_url,
-    "-H", "Content-Type: application/json",
-    "--data-binary", f"@{clean_path}"
-]
+# Example usage
+replace_text_in_file("example.txt", "old_text", "new_text")
 
-print("🚀 Sending to Elasticsearch...")
-result = subprocess.run(curl_cmd, capture_output=True, text=True)
 
-print("✅ Curl STDOUT:")
-print(result.stdout)
-if result.stderr:
-    print("⚠️ Curl STDERR:")
-    print(result.stderr)
+
+
+
 
 """
