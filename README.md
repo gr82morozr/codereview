@@ -1,26 +1,48 @@
 """
 
 
-The Cycle #1 relevance tuning is now complete and has been deployed to BPA. Key changes in this run include:
+{
+  "script": {
+    "description": "Remove empty date fields or reformat MM/dd/yyyy to dd/MM/yyyy (preserve time)",
+    "lang": "painless",
+    "source": """
+      def targetFields = [
+        [ "path" : "",           "fields" : ["datefieldA", "datefieldB"] ],
+        [ "path" : "ChildData1", "fields" : ["datefieldC", "datefieldD"] ],
+        [ "path" : "ChildData2", "fields" : ["datefieldF", "datefieldE"] ]
+      ];
 
-Ngram updated to 4 – to reduce excessive partial matches.
-→ Analyzer ngram size adjusted.
+      for (entry in targetFields) {
+        def path = entry['path'];
+        def fields = entry['fields'];
 
-Siebel ROW_ID is now treated as a whole term – e.g., "4-5JSRQVK" won't be split.
-→ Added a char_filter to replace "_" with "-" to prevent tokenization.
+        def container = path == "" ? ctx : (ctx.containsKey(path) ? ctx[path] : null);
+        if (container == null) continue;
 
-Wildcard support for ROW_ID – e.g., you can now search like "4-5JI*".
-→ Wildcard search added in the search template for relevant ID fields.
+        for (field in fields) {
+          if (!container.containsKey(field) || container[field] == null || container[field].toString().trim() == "") {
+            container.remove(field);
+            continue;
+          }
 
-Date fields are now searchable – e.g., "12/13/2019" in mm/dd/yyyy format.
-→ Date fields are also indexed as text to support this.
+          def value = container[field].toString();
+          def m = /(?<mm>\d{1,2})\/(?<dd>\d{1,2})\/(?<yyyy>\d{4})(?<time>[\sT].+)?/.matcher(value);
 
-Work full name is now searchable –
-→ Full name populated via the ingest pipeline.
+          if (m.matches()) {
+            def newDate = m.group("dd") + "/" + m.group("mm") + "/" + m.group("yyyy");
+            if (m.group("time") != null) {
+              newDate += m.group("time");
+            }
+            container[field] = newDate;
+            // Optionally also store as text version
+            // container[field + ".as_text"] = newDate;
+          }
+        }
+      }
+    """
+  }
+}
 
-Additionally, the highlight match issue has been fixed (thanks to Jarl!).
-
-Please test this version and let me know if you run into any issues.
 
 
 """
