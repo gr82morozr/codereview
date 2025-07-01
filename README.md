@@ -2,27 +2,48 @@
 
 
 
-
-
-
-def find_all_token_values_sorted(data):
-    results = []
-
-    def recurse(d):
-        if isinstance(d, dict):
-            for key, value in d.items():
-                if key == "token":
-                    results.append(value)
-                recurse(value)
-        elif isinstance(d, list):
-            for item in d:
-                recurse(item)
-
-    recurse(data)
-    # Sort by length in descending order
-    results.sort(key=lambda x: len(str(x)), reverse=True)
-    return results
-
+PUT /my_partial_index
+{
+  "settings": {
+    "analysis": {
+      "filter": {
+        "edge_ngram_filter": {
+          "type": "edge_ngram",
+          "min_gram": 2,
+          "max_gram": 20
+        }
+      },
+      "analyzer": {
+        "partial_analyzer": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "lowercase",
+            "kstem",
+            "edge_ngram_filter"
+          ]
+        },
+        "partial_search_analyzer": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "lowercase",
+            "kstem"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "title": {
+        "type": "text",
+        "analyzer": "partial_analyzer",
+        "search_analyzer": "partial_search_analyzer"
+      }
+    }
+  }
+}
 
 
 """
