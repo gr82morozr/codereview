@@ -2,48 +2,19 @@
 
 
 
-PUT /my_partial_index
-{
-  "settings": {
-    "analysis": {
-      "filter": {
-        "edge_ngram_filter": {
-          "type": "edge_ngram",
-          "min_gram": 2,
-          "max_gram": 20
-        }
-      },
-      "analyzer": {
-        "partial_analyzer": {
-          "type": "custom",
-          "tokenizer": "standard",
-          "filter": [
-            "lowercase",
-            "kstem",
-            "edge_ngram_filter"
-          ]
-        },
-        "partial_search_analyzer": {
-          "type": "custom",
-          "tokenizer": "standard",
-          "filter": [
-            "lowercase",
-            "kstem"
-          ]
-        }
-      }
-    }
-  },
-  "mappings": {
-    "properties": {
-      "title": {
-        "type": "text",
-        "analyzer": "partial_analyzer",
-        "search_analyzer": "partial_search_analyzer"
-      }
-    }
-  }
-}
+def highlight_case_insensitive(text, keyword):
+    # Use re.escape to handle special characters in keyword
+    pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+
+    # Use a lambda to wrap the *matched text* (preserves original case)
+    return pattern.sub(lambda m: f"<mark>{m.group(0)}</mark>", text)
+
+# Example usage:
+text = "John went to the market. john is a common name."
+keyword = "john"
+
+result = highlight_case_insensitive(text, keyword)
+print(result)
 
 
 """
