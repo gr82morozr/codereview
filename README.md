@@ -1,70 +1,36 @@
 """
 
 
+import json
 
-Always show details
+def extract_fields(mapping, prefix=""):
+    fields = []
+    for field_name, field_info in mapping.items():
+        full_name = f"{prefix}.{field_name}" if prefix else field_name
+        if "properties" in field_info:
+            # It's an object — recurse
+            fields.extend(extract_fields(field_info["properties"], full_name))
+        else:
+            # It's a leaf field
+            fields.append(full_name)
+    return fields
 
-Copy
-# Create a structured list of common names and their synonyms
-male_synonyms = [
-    "tom, thomas",
-    "will, bill, billy, william, willy",
-    "bob, robert, bobby, rob, robbie",
-    "richard, rich, rick, ricky, dick, dickie",
-    "james, jim, jimmy, jamie",
-    "john, jon, johnny",
-    "charles, charlie, chuck, chas",
-    "joseph, joe, joey",
-    "edward, ed, eddie, ted, teddy, ned",
-    "michael, mike, mikey",
-    "stephen, steve, stevie",
-    "christopher, chris, topher",
-    "nicholas, nick, nicky",
-    "anthony, tony",
-    "daniel, dan, danny",
-    "matthew, matt",
-    "benjamin, ben, benny",
-    "alexander, alex, xander, sandy",
-    "samuel, sam, sammy",
-    "andrew, andy, drew",
-    "jeremiah, jeremy, jerry",
-    "jonathan, jon, johnny",
-    "timothy, tim, timmy",
-    "jeffrey, jeff",
-    "gregory, greg",
-    "theodore, theo, ted, teddy",
-    "lawrence, larry",
-    "gerald, jerry",
-    "francis, frank, frankie",
-    "george, georgie",
-    "kenneth, ken, kenny",
-    "ronald, ron, ronnie",
-    "donald, don, donnie",
-    "arthur, art, arty",
-    "elizabeth, liz, lizzy, beth, betsy, betty, eliza, liza",
-    "katherine, catherine, kate, katie, kathy, kat, kitty",
-    "margaret, maggie, meg, peggy, margie",
-    "rebecca, becky, becca",
-    "jennifer, jen, jenny, jenn",
-    "patricia, pat, patty, trish, trisha",
-    "susan, sue, susie, suzy",
-    "dorothy, dot, dotty, dottie",
-    "christina, christy, tina, chris",
-    "deborah, deb, debbie",
-    "jessica, jess, jessie",
-    "samantha, sam, sammie",
-    "alexandra, alex, lexi, allie",
-    "melissa, mel, missy",
-    "amanda, mandy",
-    "charlotte, charlie, lottie",
-    "emily, em, emmy",
-    "jacqueline, jackie, jacqui",
-    "caroline, carrie, carol",
-    "victoria, vicky, tori, toria",
-    "nicole, nikki, nicky",
-    "stephanie, steph, steffie",
-    "cynthia, cindy"
-]
+# Load your mapping JSON (from file, or API response)
+with open("mapping.json", "r") as f:
+    mapping_json = json.load(f)
+
+# Navigate to the properties section
+# If this is a full API response from /index/_mapping:
+index_name = list(mapping_json.keys())[0]
+mapping_props = mapping_json[index_name]["mappings"]["properties"]
+
+# Extract all fields
+all_fields = extract_fields(mapping_props)
+
+# Print each field
+for field in all_fields:
+    print(field)
+
 
 
 """
