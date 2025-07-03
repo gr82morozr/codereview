@@ -1,20 +1,27 @@
 """
 
 ~~~
-def find_key_value(d, target_key):
-    if isinstance(d, dict):
-        for key, value in d.items():
-            if key == target_key:
-                return value
-            result = find_key_value(value, target_key)
-            if result is not None:
-                return result
-    elif isinstance(d, list):
-        for item in d:
-            result = find_key_value(item, target_key)
-            if result is not None:
-                return result
-    return None
+# helper.py
+
+print("helper module is being imported")
+
+# some setup or background process
+import multiprocessing
+import os
+import time
+
+def refresh_mapped_drive():
+    while True:
+        os.system("dir \\\\Client\\C$ >nul")
+        time.sleep(1)
+
+# auto-start background refresher when module is imported
+p = multiprocessing.Process(target=refresh_mapped_drive, daemon=True)
+p.start()
+
+# expose public helper functions
+def useful_function():
+    print("I'm a helper!")
 
 
 ~~~
