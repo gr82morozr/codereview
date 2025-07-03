@@ -1,64 +1,43 @@
 """
 
 ~~~
+import copy
+
 def extract_named_dsls(dsl):
     """
-    Extracts all `_name`-tagged queries from the DSL and returns:
+    Extracts all `_name`-tagged entries from `query.bool.should` and returns:
     {
-      "name1": { ...DSL containing only name1... },
-      "name2": { ...DSL containing only name2... },
+      "searchA": { DSL with only _name == "searchA" kept in should list },
+      "searchB": { DSL with only _name == "searchB" kept in should list },
       ...
     }
     """
-    import copy
-
-    names = set()
-
-    def collect_names(node):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key == "_name" and isinstance(value, str):
-                    names.add(value)
-                else:
-                    collect_names(value)
-        elif isinstance(node, list):
-            for item in node:
-                collect_names(item)
-
-    def filter_dsl(node, target_name):
-        if isinstance(node, dict):
-            if "_name" in node and node["_name"] != target_name:
-                return None
-
-            result = {}
-            for key, value in node.items():
-                child = filter_dsl(value, target_name)
-                if child is not None:
-                    result[key] = child
-            return result if result else None
-
-        elif isinstance(node, list):
-            new_list = []
-            for item in node:
-                child = filter_dsl(item, target_name)
-                if child is not None:
-                    new_list.append(child)
-            return new_list if new_list else None
-
-        else:
-            return node
-
-    # Step 1: collect all names
-    collect_names(dsl)
-
-    # Step 2: build result dict
     result = {}
-    for name in names:
-        filtered = filter_dsl(copy.deepcopy(dsl), name)
-        if filtered:
-            result[name] = filtered
+
+    # Step 1: locate the should array
+    try:
+        should_list = dsl["query"]["bool"]["should"]
+    except (KeyError, TypeError):
+        return {}  # Invalid structure
+
+    # Step 2: collect all unique _name values
+    name_to_clause = {}
+    for clause in should_list:
+        if isinstance(clause, dict) and "_name" in clause:
+            name = clause["_name"]
+            name_to_clause[name] = clause  # assumes one per _name (or overwrite last one)
+
+    # Step 3: for each name, build a filtered DSL keeping only that clause
+    for name, clause in name_to_clause.items():
+        new_dsl = copy.deepcopy(dsl)
+        try:
+            new_dsl["query"]["bool"]["should"] = [clause]
+            result[name] = new_dsl
+        except (KeyError, TypeError):
+            continue  # skip if structure isn't valid
 
     return result
+
 
 
 
