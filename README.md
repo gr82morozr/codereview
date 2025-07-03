@@ -1,6 +1,6 @@
 """
 
-
+~~~
 $flagPath = "C:\Path\To\flag.txt"
 $scriptToRun = "C:\Path\To\TaskScript.ps1"
 
@@ -25,6 +25,6 @@ while ($true) {
     Start-Sleep -Seconds 5  # Adjust interval as needed
 }
 
-
+~~~
 
 """
