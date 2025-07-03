@@ -23,6 +23,10 @@ function Write-GreenSeparator {
     # Reset color and write newline
     Write-Host "`e[0m"
 }
+===
+ document.querySelectorAll('[id*="_dsl_"]').forEach(function(el) {
+    el.style.display = 'none';
+  });
 
 
 
