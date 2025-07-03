@@ -1,51 +1,46 @@
 """
 
 ~~~
-import copy
+def extract_named_dsls(dsl):
+    """
+    Extracts all `_name`-tagged queries from the DSL and returns:
+    {
+      "name1": { ...DSL containing only name1... },
+      "name2": { ...DSL containing only name2... },
+      ...
+    }
+    """
+    import copy
 
-def get_search_name_list(dsl):
-    """
-    Recursively extract all '_name' values from the DSL.
-    """
     names = set()
 
-    def recurse(node):
+    def collect_names(node):
         if isinstance(node, dict):
             for key, value in node.items():
                 if key == "_name" and isinstance(value, str):
                     names.add(value)
                 else:
-                    recurse(value)
+                    collect_names(value)
         elif isinstance(node, list):
             for item in node:
-                recurse(item)
+                collect_names(item)
 
-    recurse(dsl)
-    return list(names)
-
-
-def get_named_dsl(dsl, target_name):
-    """
-    Return a copy of the DSL with only clauses that contain _name == target_name.
-    All other named clauses are removed.
-    """
-    def recurse_filter(node):
+    def filter_dsl(node, target_name):
         if isinstance(node, dict):
-            # If this is a named clause but not the target, remove it
             if "_name" in node and node["_name"] != target_name:
                 return None
 
-            filtered = {}
+            result = {}
             for key, value in node.items():
-                child = recurse_filter(value)
+                child = filter_dsl(value, target_name)
                 if child is not None:
-                    filtered[key] = child
-            return filtered if filtered else None
+                    result[key] = child
+            return result if result else None
 
         elif isinstance(node, list):
             new_list = []
             for item in node:
-                child = recurse_filter(item)
+                child = filter_dsl(item, target_name)
                 if child is not None:
                     new_list.append(child)
             return new_list if new_list else None
@@ -53,8 +48,17 @@ def get_named_dsl(dsl, target_name):
         else:
             return node
 
-    dsl_copy = copy.deepcopy(dsl)
-    return recurse_filter(dsl_copy)
+    # Step 1: collect all names
+    collect_names(dsl)
+
+    # Step 2: build result dict
+    result = {}
+    for name in names:
+        filtered = filter_dsl(copy.deepcopy(dsl), name)
+        if filtered:
+            result[name] = filtered
+
+    return result
 
 
 
