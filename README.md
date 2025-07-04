@@ -1,33 +1,21 @@
 """
 
 ~~~
-function Write-GreenSeparator {
-    param (
-        [int]$Length = 100,
-        [char]$Char = '█'
-    )
 
-    $steps = [Math]::Floor($Length / 2)
-    for ($i = 0; $i -lt $Length; $i++) {
-        # Calculate gradient: 128 → 255 → 128
-        if ($i -lt $steps) {
-            $g = 128 + [Math]::Round(127 * ($i / $steps))
-        } else {
-            $g = 255 - [Math]::Round(127 * (($i - $steps) / $steps))
-        }
 
-        # Write character with RGB green color
-        Write-Host -NoNewline "`e[38;2;0;${g};0m$Char"
-    }
+def recursive_lookup_unique(d, key):
+    return list({v for k, v in _flatten(d) if k == key})
 
-    # Reset color and write newline
-    Write-Host "`e[0m"
-}
-===
- document.querySelectorAll('[id*="_dsl_"]').forEach(function(el) {
-    el.style.display = 'none';
-  });
-
+def _flatten(d):
+    if isinstance(d, dict):
+        for k, v in d.items():
+            if isinstance(v, (dict, list)):
+                yield from _flatten(v)
+            else:
+                yield (k, v)
+    elif isinstance(d, list):
+        for item in d:
+            yield from _flatten(item)
 
 
 
