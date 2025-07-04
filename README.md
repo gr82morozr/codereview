@@ -3,21 +3,24 @@
 ~~~
 
 
-def recursive_lookup_unique(d, key):
-    return list({v for k, v in _flatten(d) if k == key})
+A couple of key points regarding search functionality:
 
-def _flatten(d):
-    if isinstance(d, dict):
-        for k, v in d.items():
-            if isinstance(v, (dict, list)):
-                yield from _flatten(v)
-            else:
-                yield (k, v)
-    elif isinstance(d, list):
-        for item in d:
-            yield from _flatten(item)
+Search by expression is not currently implemented.
+For example:
 
+FieldName = Value
 
+"john wick" AND "john yossarian" NOT "sam john"
+
+Currently, the search term is passed to Elasticsearch as a plain string.
+
+To support expression-based search, the following are required:
+
+The frontend must explicitly allow users to indicate they are entering an expression—not just a simple search term.
+
+The expression syntax must conform to Elasticsearch’s query string syntax.
+
+Let me know if you need further clarification.
 
 
 ~~~
