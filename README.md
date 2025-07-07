@@ -3,24 +3,18 @@
 ~~~
 
 
-A couple of key points regarding search functionality:
+The new index has been successfully deployed and is ready for testing.
 
-Search by expression is not currently implemented.
-For example:
+Key changes include:
 
-FieldName = Value
+Analyzer updates – Improved handling of various use cases. Search terms with or without double quotes now return consistent results.
+Note: We’ve adjusted our analyzers to make quoted and unquoted terms return consistent results in our use case.
 
-"john wick" AND "john yossarian" NOT "sam john"
+Case-insensitive exact match – Exact matches are now case-insensitive.
 
-Currently, the search term is passed to Elasticsearch as a plain string.
+Search boost adjustments – Updated boosting logic for different types of searches to improve relevance.
 
-To support expression-based search, the following are required:
-
-The frontend must explicitly allow users to indicate they are entering an expression—not just a simple search term.
-
-The expression syntax must conform to Elasticsearch’s query string syntax.
-
-Let me know if you need further clarification.
+Date-time formatting – All date-time values are now in the format: dd/mm/yyyy hh:mm:ss.
 
 
 ~~~
