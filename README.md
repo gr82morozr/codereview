@@ -1,33 +1,29 @@
 """
 
 ~~~
-$job_1 = { ...job code 1... }
-$job_2 = { ...job code 2... }
-$job_3 = { ...job code 3... }
 
-# Example: Collect all job scriptblocks
-$jobVars = Get-Variable -Name 'job_*' | Sort-Object Name
 
-$maxParallel = 20
-$allJobs = @()
+We’d like to request a 4-week test window in the SPT environment to conduct testing related to syncing Worker data to Elasticsearch indices. Given SPT’s production-like data volume, it is the most suitable environment to validate the timing and sizing required for the December release.
 
-foreach ($var in $jobVars) {
-    # Start the job
-    $allJobs += Start-Job -ScriptBlock $var.Value
+Please note the following:
 
-    # If we've started $maxParallel jobs, wait for any to finish before starting more
-    while (@($allJobs | Where-Object { $_.State -eq 'Running' }).Count -ge $maxParallel) {
-        Start-Sleep -Seconds 1  # Polling interval, adjust as needed
-    }
-}
+This activity will not involve any Siebel data changes.
 
-# Wait for any remaining jobs
-Wait-Job -Job $allJobs
+We will be syncing approximately 1.3 million Worker records to new Elasticsearch indices.
 
-# (Optional) Get results
-$results = $allJobs | ForEach-Object { Receive-Job -Job $_ }
-Remove-Job -Job $allJobs
+The code migration is independent of the September release code and will not impact existing components.
 
+The changes include a new Workflow, new EAI Dispatch Rule, and new Runtime Event.
+
+Tentative 4-week test plan:
+
+Week 1 – Set up Elasticsearch indices, deploy Siebel changes, and perform initial sync
+
+Weeks 2–3 – Test real-time and bulk data synchronization in multiple cycles; assess performance/timing under varying data loads; fine-tune code and Siebel component parameters if needed
+
+Week 4 – Final validation, cleanup, and rollback of Siebel changes (if required)
+
+Could you please confirm a suitable window for us to proceed?
 
 
 
