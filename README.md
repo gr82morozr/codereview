@@ -3,7 +3,7 @@
 ~~~
 
 
-We’d like to request a 4-week test window in the SPT environment to conduct testing related to syncing Worker data to Elasticsearch indices. Given SPT’s production-like data volume, it is the most suitable environment to validate the timing and sizing required for the December release.
+We’d like to request a 2-week (10 working days) test window in the SPT environment to conduct testing related to syncing Worker data to Elasticsearch indices. Given SPT’s production-like data volume, it is the most suitable environment to validate the timing and sizing required for the December release.
 
 Please note the following:
 
@@ -15,15 +15,22 @@ The code migration is independent of the September release code and will not imp
 
 The changes include a new Workflow, new EAI Dispatch Rule, and new Runtime Event.
 
-Tentative 4-week test plan:
+Tentative test plan:
 
-Week 1 – Set up Elasticsearch indices, deploy Siebel changes, and perform initial sync
+Days 1–3
+• Set up Elasticsearch indices
+• Deploy Siebel changes
+• Perform initial sync and validate basic data flow
 
-Weeks 2–3 – Test real-time and bulk data synchronization in multiple cycles; assess performance/timing under varying data loads; fine-tune code and Siebel component parameters if needed
-
-Week 4 – Final validation, cleanup, and rollback of Siebel changes (if required)
+Days 4–10
+• Test real-time and bulk data synchronization in several cycles
+• Assess performance and timing under expected data volumes
+• Fine-tune Siebel parameters and code if necessary
+• Perform final validation and cleanup
 
 Could you please confirm a suitable window for us to proceed?
+
+Appreciate your support!
 
 
 
