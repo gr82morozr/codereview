@@ -3,30 +3,27 @@
 ~~~
 
 
-folder_path = "/your/folder/path"  # <-- change to your folder path
-float_values = []
-
-# Manual pattern match for 'output*.json'
-for filename in os.listdir(folder_path):
-    if filename.startswith("output") and filename.endswith(".json"):
-        file_path = os.path.join(folder_path, filename)
-        if os.path.isfile(file_path):
-            with open(file_path, 'r') as f:
-                try:
-                    value = float(f.read().strip())
-                    float_values.append(value)
-                except ValueError:
-                    print(f"Skipped invalid float in file: {filename}")
-
-# Print results
+# Prepare results
 if float_values:
     count = len(float_values)
     total = sum(float_values)
-    avg = total / count
-    print(f"Files matched: {count}")
-    print(f"Average: {avg}")
-    print(f"Max: {max(float_values)}")
-    print(f"Min: {min(float_values)}")
+    average = total / count
+    max_val = max(float_values)
+    min_val = min(float_values)
+
+    result = (
+        f"Files matched: {count}\n"
+        f"Average: {average}\n"
+        f"Max: {max_val}\n"
+        f"Min: {min_val}\n"
+    )
+
+    print(result)
+
+    # Save to result.txt
+    result_path = os.path.join(folder_path, "result.txt")
+    with open(result_path, 'w') as out_file:
+        out_file.write(result)
 else:
     print("No valid float files found.")
 ~~~
