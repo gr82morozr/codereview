@@ -12,6 +12,11 @@ $sw.Stop()
 Write-Output "Time taken: $($sw.Elapsed.TotalMilliseconds) ms"
 
 
+$timeTaken = $sw.Elapsed.TotalMilliseconds
+$logEntry = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] File: $filePath | ID: $docId | Time: ${timeTaken} ms"
+
+Add-Content -Path $logPath -Value $logEntry
+
 ~~~
 
 """
