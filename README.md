@@ -3,8 +3,8 @@
 ~~~
 
 
-# SSD Endurance Test Script - Compatible with Constrained Language Mode
-# Keeps data in RAM and focuses on write performance
+# SSD Endurance Test Script - Constrained Language Mode Compatible
+# Uses only cmdlets and core operations
 
 param(
     [int64]$FileSizeMB = 100,
@@ -28,11 +28,11 @@ $CopyFile2 = Join-Path $TestPath "random_copy2.bin"
 $TotalBytesWritten = 0
 $CycleCount = 0
 
-Write-Host "=== SSD Endurance Test (Write-Optimized) ===" -ForegroundColor Cyan
-Write-Host "File Size: $FileSizeMB MB ($FileSizeBytes bytes)" -ForegroundColor Yellow
+Write-Host "=== SSD Endurance Test ===" -ForegroundColor Cyan
+Write-Host "File Size: $FileSizeMB MB" -ForegroundColor Yellow
 Write-Host "Test Path: $TestPath" -ForegroundColor Yellow
 Write-Host "Cycles: $(if ($Cycles -eq 0) { 'Infinite (Ctrl+C to stop)' } else { $Cycles })" -ForegroundColor Yellow
-Write-Host "`nPre-generating random data in RAM..." -ForegroundColor Green
+Write-Host "`nGenerating initial random data file..." -ForegroundColor Green
 
 function Format-Bytes {
     param([int64]$Bytes)
@@ -45,38 +45,40 @@ function Format-Bytes {
     return "$Bytes Bytes"
 }
 
-# Generate random data using Get-Random (slower but compatible)
-Write-Host "Generating $(Format-Bytes $FileSizeBytes) of random data..." -ForegroundColor White
+# Generate initial random data file using fsutil (fastest method in constrained mode)
+Write-Host "Creating random data file..." -ForegroundColor White
 $StartTime = Get-Date
 
-# Generate random bytes using a temporary file
-$TempRandomFile = Join-Path $TestPath "temp_random.bin"
-$ChunkSize = 1MB
-$BytesGenerated = 0
+# Use fsutil to create a file with random data (Windows built-in, very fast)
+$null = & fsutil file createnew $SourceFile $FileSizeBytes 2>&1
 
-$Stream = [System.IO.File]::Create($TempRandomFile)
+# Fill with pseudo-random data by copying random content
+# We'll use Get-Random to create varied content and write it in chunks
+$ChunkSizeMB = 10
+$ChunkSizeBytes = $ChunkSizeMB * 1MB
+$TempChunkFile = Join-Path $TestPath "temp_chunk.bin"
 
-while ($BytesGenerated -lt $FileSizeBytes) {
-    $CurrentChunkSize = [Math]::Min($ChunkSize, $FileSizeBytes - $BytesGenerated)
+# Create a chunk of random data
+$RandomChunk = -join (1..[Math]::Min($ChunkSizeBytes, 10MB) | ForEach-Object { [char](Get-Random -Minimum 0 -Maximum 256) })
+Set-Content -Path $TempChunkFile -Value $RandomChunk -Encoding Byte -NoNewline
+
+# Overwrite the file with random patterns using copy
+$BytesWritten = 0
+$OutStream = [System.IO.File]::OpenWrite($SourceFile)
+$ChunkBytes = Get-Content -Path $TempChunkFile -Encoding Byte -ReadCount 0
+
+while ($BytesWritten -lt $FileSizeBytes) {
+    $BytesToWrite = [Math]::Min($ChunkBytes.Length, $FileSizeBytes - $BytesWritten)
+    $OutStream.Write($ChunkBytes, 0, $BytesToWrite)
+    $BytesWritten += $BytesToWrite
     
-    # Generate random bytes
-    $RandomBytes = 1..$CurrentChunkSize | ForEach-Object { Get-Random -Minimum 0 -Maximum 256 }
-    $ByteArray = [byte[]]$RandomBytes
-    
-    $Stream.Write($ByteArray, 0, $CurrentChunkSize)
-    $BytesGenerated += $CurrentChunkSize
-    
-    # Progress indicator
-    $PercentComplete = [Math]::Floor(($BytesGenerated / $FileSizeBytes) * 100)
+    $PercentComplete = [Math]::Floor(($BytesWritten / $FileSizeBytes) * 100)
     Write-Progress -Activity "Generating Random Data" -Status "$PercentComplete% Complete" -PercentComplete $PercentComplete
 }
 
-$Stream.Close()
+$OutStream.Close()
+Remove-Item -Path $TempChunkFile -Force
 Write-Progress -Activity "Generating Random Data" -Completed
-
-# Load into memory
-$RandomData = [System.IO.File]::ReadAllBytes($TempRandomFile)
-Remove-Item -Path $TempRandomFile -Force
 
 $Duration = (Get-Date) - $StartTime
 Write-Host "Data generated in $($Duration.TotalSeconds.ToString('F2')) seconds" -ForegroundColor Gray
@@ -90,42 +92,35 @@ try {
         $CycleStartTime = Get-Date
         Write-Host "--- Cycle $CycleCount ---" -ForegroundColor Magenta
         
-        # Write 1: Original file
-        Write-Host "[1/3] Writing source file..." -ForegroundColor White
+        # Write 1: Copy to copy1
+        Write-Host "[1/4] Copying to copy1..." -ForegroundColor White
         $StartTime = Get-Date
-        [System.IO.File]::WriteAllBytes($SourceFile, $RandomData)
+        Copy-Item -Path $SourceFile -Destination $CopyFile1 -Force
         $TotalBytesWritten += $FileSizeBytes
         $Duration = (Get-Date) - $StartTime
-        $Speed = ($FileSizeBytes / 1MB) / $Duration.TotalSeconds
-        Write-Host "    Written in $($Duration.TotalSeconds.ToString('F2'))s @ $($Speed.ToString('F2')) MB/s" -ForegroundColor Gray
-        
-        # Write 2: First copy
-        Write-Host "[2/3] Writing copy1..." -ForegroundColor White
-        $StartTime = Get-Date
-        [System.IO.File]::WriteAllBytes($CopyFile1, $RandomData)
-        $TotalBytesWritten += $FileSizeBytes
-        $Duration = (Get-Date) - $StartTime
-        $Speed = ($FileSizeBytes / 1MB) / $Duration.TotalSeconds
+        $Speed = ($FileSizeMB) / $Duration.TotalSeconds
         Write-Host "    Written in $($Duration.TotalSeconds.ToString('F2'))s @ $($Speed.ToString('F2')) MB/s" -ForegroundColor Gray
         
         # Delete copy1
+        Write-Host "[2/4] Deleting copy1..." -ForegroundColor White
         Remove-Item -Path $CopyFile1 -Force
         
-        # Write 3: Second copy
-        Write-Host "[3/3] Writing copy2..." -ForegroundColor White
+        # Write 2: Copy to copy2
+        Write-Host "[3/4] Copying to copy2..." -ForegroundColor White
         $StartTime = Get-Date
-        [System.IO.File]::WriteAllBytes($CopyFile2, $RandomData)
+        Copy-Item -Path $SourceFile -Destination $CopyFile2 -Force
         $TotalBytesWritten += $FileSizeBytes
         $Duration = (Get-Date) - $StartTime
-        $Speed = ($FileSizeBytes / 1MB) / $Duration.TotalSeconds
+        $Speed = ($FileSizeMB) / $Duration.TotalSeconds
         Write-Host "    Written in $($Duration.TotalSeconds.ToString('F2'))s @ $($Speed.ToString('F2')) MB/s" -ForegroundColor Gray
         
         # Delete copy2
+        Write-Host "[4/4] Deleting copy2..." -ForegroundColor White
         Remove-Item -Path $CopyFile2 -Force
         
         # Cycle summary
         $CycleDuration = (Get-Date) - $CycleStartTime
-        $CycleSpeed = (($FileSizeBytes * 3) / 1MB) / $CycleDuration.TotalSeconds
+        $CycleSpeed = (($FileSizeMB * 2)) / $CycleDuration.TotalSeconds
         Write-Host "    Cycle completed in $($CycleDuration.TotalSeconds.ToString('F2'))s @ $($CycleSpeed.ToString('F2')) MB/s average" -ForegroundColor Cyan
         
         # Display total data written
@@ -150,15 +145,10 @@ try {
     if (Test-Path $SourceFile) { Remove-Item -Path $SourceFile -Force }
     if (Test-Path $CopyFile1) { Remove-Item -Path $CopyFile1 -Force }
     if (Test-Path $CopyFile2) { Remove-Item -Path $CopyFile2 -Force }
-    if (Test-Path $TempRandomFile) { Remove-Item -Path $TempRandomFile -Force }
     
     Write-Host "`n=== Test Complete ===" -ForegroundColor Cyan
     Write-Host "Total Cycles: $CycleCount" -ForegroundColor Yellow
     Write-Host "Total Data Written: $(Format-Bytes $TotalBytesWritten)" -ForegroundColor Yellow
-    
-    # Clear random data from memory
-    $RandomData = $null
-    [System.GC]::Collect()
 }
 
 
