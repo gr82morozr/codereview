@@ -3,8 +3,8 @@
 ~~~
 
 
-# SSD Endurance Test Script - Optimized for Write Performance
-# Keeps data in RAM and focuses on maximizing write throughput
+# SSD Endurance Test Script - Compatible with Constrained Language Mode
+# Keeps data in RAM and focuses on write performance
 
 param(
     [int64]$FileSizeMB = 100,
@@ -45,33 +45,44 @@ function Format-Bytes {
     return "$Bytes Bytes"
 }
 
-# Pre-generate random data in memory once
+# Generate random data using Get-Random (slower but compatible)
 Write-Host "Generating $(Format-Bytes $FileSizeBytes) of random data..." -ForegroundColor White
 $StartTime = Get-Date
 
-# Use larger buffer for better performance
-$BufferSize = [Math]::Min(64MB, $FileSizeBytes)
-$RandomData = New-Object byte[] $FileSizeBytes
-$RNG = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
-
+# Generate random bytes using a temporary file
+$TempRandomFile = Join-Path $TestPath "temp_random.bin"
+$ChunkSize = 1MB
 $BytesGenerated = 0
+
+$Stream = [System.IO.File]::Create($TempRandomFile)
+
 while ($BytesGenerated -lt $FileSizeBytes) {
-    $ChunkSize = [Math]::Min($BufferSize, $FileSizeBytes - $BytesGenerated)
-    $TempBuffer = New-Object byte[] $ChunkSize
-    $RNG.GetBytes($TempBuffer)
-    [Array]::Copy($TempBuffer, 0, $RandomData, $BytesGenerated, $ChunkSize)
-    $BytesGenerated += $ChunkSize
+    $CurrentChunkSize = [Math]::Min($ChunkSize, $FileSizeBytes - $BytesGenerated)
+    
+    # Generate random bytes
+    $RandomBytes = 1..$CurrentChunkSize | ForEach-Object { Get-Random -Minimum 0 -Maximum 256 }
+    $ByteArray = [byte[]]$RandomBytes
+    
+    $Stream.Write($ByteArray, 0, $CurrentChunkSize)
+    $BytesGenerated += $CurrentChunkSize
     
     # Progress indicator
     $PercentComplete = [Math]::Floor(($BytesGenerated / $FileSizeBytes) * 100)
     Write-Progress -Activity "Generating Random Data" -Status "$PercentComplete% Complete" -PercentComplete $PercentComplete
 }
 
-$RNG.Dispose()
+$Stream.Close()
 Write-Progress -Activity "Generating Random Data" -Completed
+
+# Load into memory
+$RandomData = [System.IO.File]::ReadAllBytes($TempRandomFile)
+Remove-Item -Path $TempRandomFile -Force
+
 $Duration = (Get-Date) - $StartTime
 Write-Host "Data generated in $($Duration.TotalSeconds.ToString('F2')) seconds" -ForegroundColor Gray
 Write-Host "`nStarting write cycles...`n" -ForegroundColor Green
+
+$GlobalStartTime = Get-Date
 
 try {
     do {
@@ -118,8 +129,10 @@ try {
         Write-Host "    Cycle completed in $($CycleDuration.TotalSeconds.ToString('F2'))s @ $($CycleSpeed.ToString('F2')) MB/s average" -ForegroundColor Cyan
         
         # Display total data written
+        $TotalElapsed = ((Get-Date) - $GlobalStartTime).TotalSeconds
+        $OverallSpeed = ($TotalBytesWritten / 1MB) / $TotalElapsed
         Write-Host "`n>>> TOTAL DATA WRITTEN: $(Format-Bytes $TotalBytesWritten) <<<" -ForegroundColor Green
-        Write-Host ">>> AVERAGE WRITE SPEED: $(($TotalBytesWritten / 1MB / ((Get-Date) - $StartTime).TotalSeconds).ToString('F2')) MB/s <<<`n" -ForegroundColor Green
+        Write-Host ">>> OVERALL WRITE SPEED: $($OverallSpeed.ToString('F2')) MB/s <<<`n" -ForegroundColor Green
         
         # Check if we should continue
         if ($Cycles -gt 0 -and $CycleCount -ge $Cycles) {
@@ -130,12 +143,14 @@ try {
     
 } catch {
     Write-Host "`nError occurred: $_" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
 } finally {
     # Cleanup
     Write-Host "`nCleaning up..." -ForegroundColor Yellow
     if (Test-Path $SourceFile) { Remove-Item -Path $SourceFile -Force }
     if (Test-Path $CopyFile1) { Remove-Item -Path $CopyFile1 -Force }
     if (Test-Path $CopyFile2) { Remove-Item -Path $CopyFile2 -Force }
+    if (Test-Path $TempRandomFile) { Remove-Item -Path $TempRandomFile -Force }
     
     Write-Host "`n=== Test Complete ===" -ForegroundColor Cyan
     Write-Host "Total Cycles: $CycleCount" -ForegroundColor Yellow
