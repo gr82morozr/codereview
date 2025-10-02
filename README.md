@@ -3,7 +3,7 @@
 ~~~
 
 
-# SSD Endurance Test Script - Pure Cmdlet Version
+# SSD Endurance Test Script - Pure Cmdlet Version with Real Random Data
 # Works in Constrained Language Mode
 
 param(
@@ -47,28 +47,58 @@ function Format-Bytes {
     return "$Bytes Bytes"
 }
 
-# Generate initial random data file
-Write-Host "`nGenerating initial random data file..." -ForegroundColor Green
+# Generate initial random data file with truly random bytes
+Write-Host "`nGenerating incompressible random data..." -ForegroundColor Green
 $StartTime = Get-Date
 
-# Create file with random-ish data using fsutil
 $FileSizeBytes = $FileSizeMB * 1MB
-fsutil file createnew $SourceFile $FileSizeBytes | Out-Null
 
-# Make it more random by writing random bytes
-$ChunkSize = 1MB
-$RandomData = @()
-for ($i = 0; $i -lt $ChunkSize; $i++) {
-    $RandomData += Get-Random -Minimum 0 -Maximum 255
+# Generate in chunks to show progress
+$ChunkSizeMB = 5
+$ChunkSizeBytes = $ChunkSizeMB * 1MB
+$TotalChunks = [Math]::Ceiling($FileSizeMB / $ChunkSizeMB)
+$CurrentChunk = 0
+
+# Delete existing file if present
+if (Test-Path $SourceFile) {
+    Remove-Item -Path $SourceFile -Force
 }
 
-# Write random pattern to file
-$ByteArray = [byte[]]$RandomData
-$null = Add-Content -Path $SourceFile -Value $ByteArray -Encoding Byte
+# Create empty file first
+$null = New-Item -Path $SourceFile -ItemType File -Force
+
+# Generate and append random data in chunks
+$BytesWritten = 0
+
+while ($BytesWritten -lt $FileSizeBytes) {
+    $CurrentChunk++
+    $RemainingBytes = $FileSizeBytes - $BytesWritten
+    $ThisChunkSize = [Math]::Min($ChunkSizeBytes, $RemainingBytes)
+    
+    Write-Progress -Activity "Generating Random Data" -Status "Chunk $CurrentChunk of $TotalChunks" -PercentComplete (($BytesWritten / $FileSizeBytes) * 100)
+    
+    # Generate truly random bytes for this chunk
+    $RandomBytes = New-Object byte[] $ThisChunkSize
+    for ($i = 0; $i -lt $ThisChunkSize; $i++) {
+        $RandomBytes[$i] = Get-Random -Minimum 0 -Maximum 256
+    }
+    
+    # Append to file
+    Add-Content -Path $SourceFile -Value $RandomBytes -Encoding Byte
+    
+    $BytesWritten += $ThisChunkSize
+}
+
+Write-Progress -Activity "Generating Random Data" -Completed
 
 $Duration = (Get-Date) - $StartTime
 $DurationSeconds = $Duration.TotalSeconds
-Write-Host "Initial file created in $($DurationSeconds.ToString('F2')) seconds" -ForegroundColor Gray
+Write-Host "Random data generated in $($DurationSeconds.ToString('F2')) seconds" -ForegroundColor Gray
+
+# Verify file size
+$FileInfo = Get-Item $SourceFile
+Write-Host "File created: $($FileInfo.Length) bytes" -ForegroundColor Gray
+
 Write-Host "`nStarting write cycles...`n" -ForegroundColor Green
 
 $GlobalStartTime = Get-Date
@@ -140,6 +170,7 @@ try {
     
 } catch {
     Write-Host "`nError occurred: $_" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
 } finally {
     # Cleanup
     Write-Host "`nCleaning up..." -ForegroundColor Yellow
@@ -152,7 +183,6 @@ try {
     Write-Host "Total Cycles: $CycleCount" -ForegroundColor Yellow
     Write-Host "Total Data Written: $FormattedTotal" -ForegroundColor Yellow
 }
-
 ~~~
 
 """
