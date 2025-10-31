@@ -3,186 +3,192 @@
 ~~~
 
 
-# SSD Endurance Test Script - Pure Cmdlet Version with Real Random Data
-# Works in Constrained Language Mode
+import argparse
+import base64
+import logging
+import socket
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Tuple
 
-param(
-    [int64]$FileSizeMB = 100,
-    [string]$TestPath = "C:\SSDTest",
-    [int]$Cycles = 0  # 0 = infinite, otherwise specify number of cycles
-)
 
-# Create test directory if it doesn't exist
-if (-not (Test-Path $TestPath)) {
-    New-Item -ItemType Directory -Path $TestPath | Out-Null
-}
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat()
 
-$SourceFile = Join-Path $TestPath "random_source.bin"
-$CopyFile1 = Join-Path $TestPath "random_copy1.bin"
-$CopyFile2 = Join-Path $TestPath "random_copy2.bin"
 
-# Initialize counters
-$TotalBytesWritten = 0
-$CycleCount = 0
+def _read_body(handler: BaseHTTPRequestHandler) -> bytes:
+    # Support Content-Length and basic chunked transfer encoding.
+    te = handler.headers.get("Transfer-Encoding", "").lower()
+    if "chunked" in te:
+        body = bytearray()
+        r = handler.rfile
+        while True:
+            line = r.readline().strip()
+            if not line:
+                break
+            try:
+                chunk_size = int(line.split(b";", 1)[0], 16)
+            except ValueError:
+                break
+            if chunk_size == 0:
+                # consume trailer headers (if any) until blank line
+                while True:
+                    trailer = r.readline()
+                    if trailer in (b"\r\n", b"\n", b""):
+                        break
+                break
+            chunk = r.read(chunk_size)
+            body.extend(chunk)
+            # consume trailing CRLF
+            r.read(2)
+        return bytes(body)
 
-Write-Host "=== SSD Endurance Test ===" -ForegroundColor Cyan
-Write-Host "File Size: $FileSizeMB MB" -ForegroundColor Yellow
-Write-Host "Test Path: $TestPath" -ForegroundColor Yellow
-Write-Host "Cycles: $(if ($Cycles -eq 0) { 'Infinite (Ctrl+C to stop)' } else { $Cycles })" -ForegroundColor Yellow
+    length_hdr = handler.headers.get("Content-Length")
+    if not length_hdr:
+        return b""
+    try:
+        length = int(length_hdr)
+    except (TypeError, ValueError):
+        length = 0
+    if length <= 0:
+        return b""
+    return handler.rfile.read(length)
 
-function Format-Bytes {
-    param([int64]$Bytes)
-    
-    $PB = 1PB
-    $TB = 1TB
-    $GB = 1GB
-    $MB = 1MB
-    $KB = 1KB
-    
-    if ($Bytes -ge $PB) { return "{0:N2} PB" -f ($Bytes / $PB) }
-    if ($Bytes -ge $TB) { return "{0:N2} TB" -f ($Bytes / $TB) }
-    if ($Bytes -ge $GB) { return "{0:N2} GB" -f ($Bytes / $GB) }
-    if ($Bytes -ge $MB) { return "{0:N2} MB" -f ($Bytes / $MB) }
-    if ($Bytes -ge $KB) { return "{0:N2} KB" -f ($Bytes / $KB) }
-    return "$Bytes Bytes"
-}
 
-# Generate initial random data file with truly random bytes
-Write-Host "`nGenerating incompressible random data..." -ForegroundColor Green
-$StartTime = Get-Date
+def _format_log_entry(handler: BaseHTTPRequestHandler, body: bytes) -> str:
+    ts = _now_iso()
+    client_ip, client_port = handler.client_address
+    request_line = f"{handler.command} {handler.path} {handler.request_version}"
+    # Headers as raw string
+    headers_str = "".join(f"{k}: {v}\n" for k, v in handler.headers.items())
+    body_b64 = base64.b64encode(body).decode("ascii") if body else ""
+    body_len = len(body)
+    entry = (
+        f"-----\n"
+        f"timestamp: {ts}\n"
+        f"remote: {client_ip}:{client_port}\n"
+        f"request_line: {request_line}\n"
+        f"headers:\n{headers_str}"
+        f"body_length: {body_len}\n"
+        f"body_base64: {body_b64}\n"
+    )
+    return entry
 
-$FileSizeBytes = $FileSizeMB * 1MB
 
-# Generate in chunks to show progress
-$ChunkSizeMB = 5
-$ChunkSizeBytes = $ChunkSizeMB * 1MB
-$TotalChunks = [Math]::Ceiling($FileSizeMB / $ChunkSizeMB)
-$CurrentChunk = 0
+class CaptureHandler(BaseHTTPRequestHandler):
+    server_version = "MockCapture/1.0"
 
-# Delete existing file if present
-if (Test-Path $SourceFile) {
-    Remove-Item -Path $SourceFile -Force
-}
+    def _capture_and_respond(self):
+        body = _read_body(self)
+        logging.info(_format_log_entry(self, body))
 
-# Create empty file first
-$null = New-Item -Path $SourceFile -ItemType File -Force
+        # Respond with a simple 200 OK echo with request info
+        content = (
+            f"Captured {self.command} {self.path}\n"
+            f"Time: {_now_iso()}\n"
+            f"Bytes: {len(body)}\n"
+        ).encode("utf-8")
 
-# Generate and append random data in chunks
-$BytesWritten = 0
+        # For HEAD, do not send a body
+        send_body = self.command.upper() != "HEAD"
 
-while ($BytesWritten -lt $FileSizeBytes) {
-    $CurrentChunk++
-    $RemainingBytes = $FileSizeBytes - $BytesWritten
-    $ThisChunkSize = [Math]::Min($ChunkSizeBytes, $RemainingBytes)
-    
-    Write-Progress -Activity "Generating Random Data" -Status "Chunk $CurrentChunk of $TotalChunks" -PercentComplete (($BytesWritten / $FileSizeBytes) * 100)
-    
-    # Generate truly random bytes for this chunk
-    $RandomBytes = New-Object byte[] $ThisChunkSize
-    for ($i = 0; $i -lt $ThisChunkSize; $i++) {
-        $RandomBytes[$i] = Get-Random -Minimum 0 -Maximum 256
-    }
-    
-    # Append to file
-    Add-Content -Path $SourceFile -Value $RandomBytes -Encoding Byte
-    
-    $BytesWritten += $ThisChunkSize
-}
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(content) if send_body else 0))
+        self.end_headers()
+        if send_body:
+            self.wfile.write(content)
 
-Write-Progress -Activity "Generating Random Data" -Completed
+    def do_GET(self):
+        self._capture_and_respond()
 
-$Duration = (Get-Date) - $StartTime
-$DurationSeconds = $Duration.TotalSeconds
-Write-Host "Random data generated in $($DurationSeconds.ToString('F2')) seconds" -ForegroundColor Gray
+    def do_POST(self):
+        self._capture_and_respond()
 
-# Verify file size
-$FileInfo = Get-Item $SourceFile
-Write-Host "File created: $($FileInfo.Length) bytes" -ForegroundColor Gray
+    def do_PUT(self):
+        self._capture_and_respond()
 
-Write-Host "`nStarting write cycles...`n" -ForegroundColor Green
+    def do_DELETE(self):
+        self._capture_and_respond()
 
-$GlobalStartTime = Get-Date
+    def do_PATCH(self):
+        self._capture_and_respond()
 
-try {
-    do {
-        $CycleCount++
-        $CycleStartTime = Get-Date
-        Write-Host "--- Cycle $CycleCount ---" -ForegroundColor Magenta
-        
-        # Write 1: Copy to copy1
-        Write-Host "[1/4] Copying to copy1..." -ForegroundColor White
-        $WriteStart = Get-Date
-        Copy-Item -Path $SourceFile -Destination $CopyFile1 -Force
-        $TotalBytesWritten += $FileSizeBytes
-        $WriteDuration = (Get-Date) - $WriteStart
-        $WriteSeconds = $WriteDuration.TotalSeconds
-        if ($WriteSeconds -gt 0) {
-            $Speed = $FileSizeMB / $WriteSeconds
-            Write-Host "    Written in $($WriteSeconds.ToString('F2'))s @ $($Speed.ToString('F2')) MB/s" -ForegroundColor Gray
-        }
-        
-        # Delete copy1
-        Write-Host "[2/4] Deleting copy1..." -ForegroundColor White
-        Remove-Item -Path $CopyFile1 -Force
-        
-        # Write 2: Copy to copy2
-        Write-Host "[3/4] Copying to copy2..." -ForegroundColor White
-        $WriteStart = Get-Date
-        Copy-Item -Path $SourceFile -Destination $CopyFile2 -Force
-        $TotalBytesWritten += $FileSizeBytes
-        $WriteDuration = (Get-Date) - $WriteStart
-        $WriteSeconds = $WriteDuration.TotalSeconds
-        if ($WriteSeconds -gt 0) {
-            $Speed = $FileSizeMB / $WriteSeconds
-            Write-Host "    Written in $($WriteSeconds.ToString('F2'))s @ $($Speed.ToString('F2')) MB/s" -ForegroundColor Gray
-        }
-        
-        # Delete copy2
-        Write-Host "[4/4] Deleting copy2..." -ForegroundColor White
-        Remove-Item -Path $CopyFile2 -Force
-        
-        # Cycle summary
-        $CycleDuration = (Get-Date) - $CycleStartTime
-        $CycleSeconds = $CycleDuration.TotalSeconds
-        if ($CycleSeconds -gt 0) {
-            $CycleSpeed = ($FileSizeMB * 2) / $CycleSeconds
-            Write-Host "    Cycle completed in $($CycleSeconds.ToString('F2'))s @ $($CycleSpeed.ToString('F2')) MB/s average" -ForegroundColor Cyan
-        }
-        
-        # Display total data written
-        $TotalElapsed = (Get-Date) - $GlobalStartTime
-        $TotalSeconds = $TotalElapsed.TotalSeconds
-        $FormattedTotal = Format-Bytes $TotalBytesWritten
-        Write-Host "`n>>> TOTAL DATA WRITTEN: $FormattedTotal <<<" -ForegroundColor Green
-        
-        if ($TotalSeconds -gt 0) {
-            $TotalMB = $TotalBytesWritten / 1MB
-            $OverallSpeed = $TotalMB / $TotalSeconds
-            Write-Host ">>> OVERALL WRITE SPEED: $($OverallSpeed.ToString('F2')) MB/s <<<`n" -ForegroundColor Green
-        }
-        
-        # Check if we should continue
-        if ($Cycles -gt 0 -and $CycleCount -ge $Cycles) {
-            break
-        }
-        
-    } while ($true)
-    
-} catch {
-    Write-Host "`nError occurred: $_" -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
-} finally {
-    # Cleanup
-    Write-Host "`nCleaning up..." -ForegroundColor Yellow
-    if (Test-Path $SourceFile) { Remove-Item -Path $SourceFile -Force }
-    if (Test-Path $CopyFile1) { Remove-Item -Path $CopyFile1 -Force }
-    if (Test-Path $CopyFile2) { Remove-Item -Path $CopyFile2 -Force }
-    
-    $FormattedTotal = Format-Bytes $TotalBytesWritten
-    Write-Host "`n=== Test Complete ===" -ForegroundColor Cyan
-    Write-Host "Total Cycles: $CycleCount" -ForegroundColor Yellow
-    Write-Host "Total Data Written: $FormattedTotal" -ForegroundColor Yellow
-}
+    def do_OPTIONS(self):
+        self._capture_and_respond()
+
+    def do_HEAD(self):
+        self._capture_and_respond()
+
+    def log_message(self, format: str, *args):
+        # Also write access logs to the same logger for convenience
+        logging.info("access - " + (format % args))
+
+
+def _resolve_bind(bind: str) -> tuple[str, int]:
+    host, _, port_str = bind.partition(":")
+    if not port_str:
+        raise ValueError("--bind must be in HOST:PORT format, or use --port")
+    try:
+        port = int(port_str)
+    except ValueError:
+        raise ValueError("Invalid port in --bind")
+    return host or "0.0.0.0", port
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Simple HTTP capture server")
+    parser.add_argument("--port", type=int, default=8080, help="TCP port to listen on")
+    parser.add_argument(
+        "--bind",
+        type=str,
+        default=None,
+        help="Optional bind address as HOST:PORT (overrides --port)",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default="requests.log",
+        help="Path to append captured requests",
+    )
+    args = parser.parse_args()
+
+    if args.bind:
+        host, port = _resolve_bind(args.bind)
+    else:
+        host, port = "0.0.0.0", args.port
+
+    # Configure logging to file (thread-safe)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[logging.FileHandler(args.log_file, encoding="utf-8"), logging.StreamHandler()]
+    )
+
+    # Try binding early to provide clear error if port is in use
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+        except OSError as e:
+            raise SystemExit(f"Failed to bind {host}:{port} - {e}")
+
+    server = ThreadingHTTPServer((host, port), CaptureHandler)
+    print(f"Listening on http://{host}:{port} — logging to {args.log_file}")
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
 ~~~
 
 """
