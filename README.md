@@ -4,12 +4,12 @@
 
 
 import argparse
-import base64
 import logging
 import socket
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Tuple
+from pathlib import Path
 
 
 def _now_iso() -> str:
@@ -54,25 +54,42 @@ def _read_body(handler: BaseHTTPRequestHandler) -> bytes:
         return b""
     return handler.rfile.read(length)
 
+def _filename_timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
-def _format_log_entry(handler: BaseHTTPRequestHandler, body: bytes) -> str:
-    ts = _now_iso()
+
+def _write_request_file(handler: BaseHTTPRequestHandler, body: bytes, out_dir: str) -> Path:
+    ts_file = _filename_timestamp()
+    method = (handler.command or "REQUEST").upper()
+    base = f"{method}.{ts_file}.txt"
+    out_path = Path(out_dir) / base
+
+    # Avoid collisions within the same second
+    counter = 1
+    while out_path.exists():
+        out_path = Path(out_dir) / f"{method}.{ts_file}_{counter}.txt"
+        counter += 1
+
     client_ip, client_port = handler.client_address
     request_line = f"{handler.command} {handler.path} {handler.request_version}"
-    # Headers as raw string
     headers_str = "".join(f"{k}: {v}\n" for k, v in handler.headers.items())
-    body_b64 = base64.b64encode(body).decode("ascii") if body else ""
-    body_len = len(body)
-    entry = (
-        f"-----\n"
-        f"timestamp: {ts}\n"
+
+    header_block = (
+        f"timestamp: {_now_iso()}\n"
         f"remote: {client_ip}:{client_port}\n"
         f"request_line: {request_line}\n"
         f"headers:\n{headers_str}"
-        f"body_length: {body_len}\n"
-        f"body_base64: {body_b64}\n"
-    )
-    return entry
+        f"body_length: {len(body)}\n"
+        f"\n"  # blank line, then raw body
+    ).encode("utf-8")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "wb") as f:
+        f.write(header_block)
+        if body:
+            f.write(body)
+
+    return out_path
 
 
 class CaptureHandler(BaseHTTPRequestHandler):
@@ -80,7 +97,12 @@ class CaptureHandler(BaseHTTPRequestHandler):
 
     def _capture_and_respond(self):
         body = _read_body(self)
-        logging.info(_format_log_entry(self, body))
+        try:
+            out_dir = getattr(self.server, "out_dir", ".")
+            path = _write_request_file(self, body, out_dir)
+            logging.info(f"saved request to {path}")
+        except Exception as e:
+            logging.error(f"failed to write request file: {e}")
 
         # Respond with a simple 200 OK echo with request info
         content = (
@@ -146,10 +168,10 @@ def main():
         help="Optional bind address as HOST:PORT (overrides --port)",
     )
     parser.add_argument(
-        "--log-file",
+        "--out-dir",
         type=str,
-        default="requests.log",
-        help="Path to append captured requests",
+        default=".",
+        help="Directory to write per-request files",
     )
     args = parser.parse_args()
 
@@ -158,12 +180,8 @@ def main():
     else:
         host, port = "0.0.0.0", args.port
 
-    # Configure logging to file (thread-safe)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(message)s",
-        handlers=[logging.FileHandler(args.log_file, encoding="utf-8"), logging.StreamHandler()]
-    )
+    # Configure console logging only
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     # Try binding early to provide clear error if port is in use
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -174,7 +192,8 @@ def main():
             raise SystemExit(f"Failed to bind {host}:{port} - {e}")
 
     server = ThreadingHTTPServer((host, port), CaptureHandler)
-    print(f"Listening on http://{host}:{port} — logging to {args.log_file}")
+    server.out_dir = args.out_dir
+    print(f"Listening on http://{host}:{port} — writing requests to {args.out_dir}")
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
