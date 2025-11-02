@@ -3,207 +3,71 @@
 ~~~
 
 
-import argparse
-import logging
-import socket
-from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Tuple
-from pathlib import Path
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
+# ======================= USER-CONFIGURABLE CONSTANTS =======================
+TEMPLATE_PATH = "template.xml"        # XML template file that contains the placeholder
+OUTPUT_PATH   = "out.xml"             # Where the filled XML will be written
+PLACEHOLDER   = "{{BASE64_DATA}}"     # Placeholder token to be replaced in the template
+# ==========================================================================
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat()
-
-
-def _read_body(handler: BaseHTTPRequestHandler) -> bytes:
-    # Support Content-Length and basic chunked transfer encoding.
-    te = handler.headers.get("Transfer-Encoding", "").lower()
-    if "chunked" in te:
-        body = bytearray()
-        r = handler.rfile
-        while True:
-            line = r.readline().strip()
-            if not line:
-                break
-            try:
-                chunk_size = int(line.split(b";", 1)[0], 16)
-            except ValueError:
-                break
-            if chunk_size == 0:
-                # consume trailer headers (if any) until blank line
-                while True:
-                    trailer = r.readline()
-                    if trailer in (b"\r\n", b"\n", b""):
-                        break
-                break
-            chunk = r.read(chunk_size)
-            body.extend(chunk)
-            # consume trailing CRLF
-            r.read(2)
-        return bytes(body)
-
-    length_hdr = handler.headers.get("Content-Length")
-    if not length_hdr:
-        return b""
-    try:
-        length = int(length_hdr)
-    except (TypeError, ValueError):
-        length = 0
-    if length <= 0:
-        return b""
-    return handler.rfile.read(length)
-
-def _filename_timestamp() -> str:
-    return datetime.now().strftime("%Y-%m-%d_%H%M%S")
-
-
-def _write_request_file(handler: BaseHTTPRequestHandler, body: bytes, out_dir: str) -> Path:
-    ts_file = _filename_timestamp()
-    method = (handler.command or "REQUEST").upper()
-    base = f"{method}.{ts_file}.txt"
-    out_path = Path(out_dir) / base
-
-    # Avoid collisions within the same second
-    counter = 1
-    while out_path.exists():
-        out_path = Path(out_dir) / f"{method}.{ts_file}_{counter}.txt"
-        counter += 1
-
-    client_ip, client_port = handler.client_address
-    request_line = f"{handler.command} {handler.path} {handler.request_version}"
-    headers_str = "".join(f"{k}: {v}\n" for k, v in handler.headers.items())
-
-    header_block = (
-        f"timestamp: {_now_iso()}\n"
-        f"remote: {client_ip}:{client_port}\n"
-        f"request_line: {request_line}\n"
-        f"headers:\n{headers_str}"
-        f"body_length: {len(body)}\n"
-        f"\n"  # blank line, then raw body
-    ).encode("utf-8")
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "wb") as f:
-        f.write(header_block)
-        if body:
-            f.write(body)
-
-    return out_path
-
-
-class CaptureHandler(BaseHTTPRequestHandler):
-    server_version = "MockCapture/1.0"
-
-    def _capture_and_respond(self):
-        body = _read_body(self)
-        try:
-            out_dir = getattr(self.server, "out_dir", ".")
-            path = _write_request_file(self, body, out_dir)
-            logging.info(f"saved request to {path}")
-        except Exception as e:
-            logging.error(f"failed to write request file: {e}")
-
-        # Respond with a simple 200 OK echo with request info
-        content = (
-            f"Captured {self.command} {self.path}\n"
-            f"Time: {_now_iso()}\n"
-            f"Bytes: {len(body)}\n"
-        ).encode("utf-8")
-
-        # For HEAD, do not send a body
-        send_body = self.command.upper() != "HEAD"
-
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(content) if send_body else 0))
-        self.end_headers()
-        if send_body:
-            self.wfile.write(content)
-
-    def do_GET(self):
-        self._capture_and_respond()
-
-    def do_POST(self):
-        self._capture_and_respond()
-
-    def do_PUT(self):
-        self._capture_and_respond()
-
-    def do_DELETE(self):
-        self._capture_and_respond()
-
-    def do_PATCH(self):
-        self._capture_and_respond()
-
-    def do_OPTIONS(self):
-        self._capture_and_respond()
-
-    def do_HEAD(self):
-        self._capture_and_respond()
-
-    def log_message(self, format: str, *args):
-        # Also write access logs to the same logger for convenience
-        logging.info("access - " + (format % args))
-
-
-def _resolve_bind(bind: str) -> tuple[str, int]:
-    host, _, port_str = bind.partition(":")
-    if not port_str:
-        raise ValueError("--bind must be in HOST:PORT format, or use --port")
-    try:
-        port = int(port_str)
-    except ValueError:
-        raise ValueError("Invalid port in --bind")
-    return host or "0.0.0.0", port
-
+import sys           # to read the single CLI argument (MB)
+import os            # to generate random bytes with os.urandom
+import base64        # to convert the random bytes to Base64
+from pathlib import Path  # for simple, robust file I/O
 
 def main():
-    parser = argparse.ArgumentParser(description="Simple HTTP capture server")
-    parser.add_argument("--port", type=int, default=8080, help="TCP port to listen on")
-    parser.add_argument(
-        "--bind",
-        type=str,
-        default=None,
-        help="Optional bind address as HOST:PORT (overrides --port)",
-    )
-    parser.add_argument(
-        "--out-dir",
-        type=str,
-        default=".",
-        help="Directory to write per-request files",
-    )
-    args = parser.parse_args()
+    # --- 1) validate & read the single argument (integer MB) ---
+    if len(sys.argv) != 2:  # require exactly one argument: MB
+        print(f"Usage: {Path(sys.argv[0]).name} <MB>", file=sys.stderr)  # show usage if wrong
+        sys.exit(2)  # exit with error code
 
-    if args.bind:
-        host, port = _resolve_bind(args.bind)
-    else:
-        host, port = "0.0.0.0", args.port
-
-    # Configure console logging only
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    # Try binding early to provide clear error if port is in use
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind((host, port))
-        except OSError as e:
-            raise SystemExit(f"Failed to bind {host}:{port} - {e}")
-
-    server = ThreadingHTTPServer((host, port), CaptureHandler)
-    server.out_dir = args.out_dir
-    print(f"Listening on http://{host}:{port} — writing requests to {args.out_dir}")
     try:
-        server.serve_forever(poll_interval=0.5)
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-    finally:
-        server.server_close()
+        mb = int(sys.argv[1])  # convert the provided argument to integer MB
+    except ValueError:
+        print("Error: <MB> must be an integer.", file=sys.stderr)  # inform user on invalid input
+        sys.exit(2)  # exit with error
 
+    if mb <= 0:
+        print("Error: <MB> must be > 0.", file=sys.stderr)  # forbid zero/negative sizes
+        sys.exit(2)
 
+    # --- 2) compute total bytes to generate (MB -> bytes) ---
+    total_bytes = mb * 1024 * 1024  # 1 MB = 1,048,576 bytes (MiB style)
+
+    # --- 3) generate exactly that many cryptographically random bytes ---
+    raw = os.urandom(total_bytes)  # returns a bytes object of length total_bytes
+
+    # --- 4) base64-encode the bytes in one shot (simple & fine up to ~50MB) ---
+    b64_bytes = base64.b64encode(raw)  # convert binary data to Base64 bytes
+
+    # --- 5) decode Base64 bytes to a regular text string for XML insertion ---
+    b64_text = b64_bytes.decode("ascii")  # Base64 is ASCII-safe; decode to str
+
+    # --- 6) load the XML template (UTF-8) ---
+    template_path = Path(TEMPLATE_PATH)  # wrap string path with Path for convenience
+    if not template_path.is_file():      # ensure the template exists
+        print(f"Error: template not found: {template_path}", file=sys.stderr)
+        sys.exit(1)
+
+    template_str = template_path.read_text(encoding="utf-8")  # read entire template as text
+
+    # --- 7) replace ALL placeholder occurrences with the Base64 string ---
+    if PLACEHOLDER not in template_str:  # warn if placeholder is missing
+        print(f"Warning: placeholder '{PLACEHOLDER}' not found in template.", file=sys.stderr)
+    filled_str = template_str.replace(PLACEHOLDER, b64_text)  # simple global replace
+
+    # --- 8) write the filled XML to the output file (UTF-8) ---
+    Path(OUTPUT_PATH).write_text(filled_str, encoding="utf-8")  # save to disk
+
+    # --- 9) print a tiny success message ---
+    print(f"[OK] Generated {mb} MB random data, filled into '{OUTPUT_PATH}'.")
+
+# standard boilerplate to run main() when invoked as script
 if __name__ == "__main__":
     main()
+
 
 
 
