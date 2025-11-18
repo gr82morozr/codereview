@@ -2,34 +2,44 @@
 
 ~~~
 
+#!/usr/bin/env python3
+"""Decode a base64-encoded file and write the decoded bytes to a new file."""
 
-SET TERMOUT OFF;
-SET HEADING ON;
-SET VERIFY OFF;
-SET FEEDBACK OFF;
-SET TRIMSPOOL ON;
-SET LINESIZE 32767;
-SET PAGESIZE 5000;
-SET MARKUP CSV ON DELIMITER , QUOTE ON;
+from __future__ import annotations
 
-SELECT
-    ROW_ID,
-    MSG_TYPE_CD,
-    NAME,
-    ERR_MSG_CAT_NAME,
-    ERR_MSG_NUM,
-    MSG_TEXT
-FROM SIEBEL.S_ISS_VALDN_MSG
-WHERE (
-        LOWER(NAME) LIKE LOWER({{like_keyword}})
-        OR LOWER(MSG_TEXT) LIKE LOWER({{like_keyword}})
-        OR LOWER(ERR_MSG_CAT_NAME) LIKE LOWER({{like_keyword}})
-        OR LOWER(MSG_TYPE_CD) LIKE LOWER({{like_keyword}})
-        OR TO_CHAR(ERR_MSG_NUM) LIKE {{like_keyword}}
-      )
-ORDER BY ROW_ID;
+import argparse
+import base64
+from pathlib import Path
 
-EXIT;
+
+def build_parser() -> argparse.ArgumentParser:
+  parser = argparse.ArgumentParser(
+      description="Decode a base64-encoded file into raw bytes.")
+  parser.add_argument("input", type=Path, help="Path to the base64-encoded file.")
+  parser.add_argument(
+      "output",
+      type=Path,
+      help="Path where the decoded bytes should be written.",
+  )
+  return parser
+
+
+def main() -> None:
+  parser = build_parser()
+  args = parser.parse_args()
+
+  data = args.input.read_text()
+  decoded = base64.b64decode(data)
+  args.output.write_bytes(decoded)
+  print(
+      f"[decode_base64] Wrote {len(decoded)} bytes to {args.output} "
+      f"(source {args.input})"
+  )
+
+
+if __name__ == "__main__":
+  main()
+
 
 
 
